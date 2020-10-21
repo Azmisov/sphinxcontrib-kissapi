@@ -63,6 +63,8 @@ from docutils.statemachine import ViewList
 from sphinx.util.docutils import SphinxDirective
 from sphinx.util.nodes import nested_parse_with_titles
 
+__version__ = "1.0.0"
+
 def _nonempty_str(v):
     if not isinstance(v, str) or not str:
         raise TypeError("need a non-empty string")

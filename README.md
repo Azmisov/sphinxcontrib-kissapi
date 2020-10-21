@@ -7,14 +7,14 @@ Why use this plugin?
 --------------------
 This plugin takes a different approach than others like [autoapi](https://sphinx-autoapi.readthedocs.io),
 [automodapi](https://sphinx-automodapi.readthedocs.io), or plain
-[autodoc](https://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html). I found that it these other plugins
+[autodoc](https://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html). I found that these other plugins
 did a pretty good job of automatically generating API docs, but it was never perfect. They wouldn't know exactly what
 to include in the docs, and there just weren't enough customization options to get what I needed.
 
 Instead of generating the docs automatically, this plugin provides a simple, flexible API for analyzing and introspecting
 your python code. Using the API, you can generate reST documentation yourself however you want! *Keep it simple, stupid.*
 
-I've also included a default "renderer" which will generate reST documentation automatically. You can use these if
+I've also included a default "renderer" which will generate reST documentation automatically. You can use that if
 you are satisfied with the output and don't need any additional customization.
 
 Quickstart
