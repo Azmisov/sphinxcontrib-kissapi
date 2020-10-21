@@ -12,7 +12,7 @@ did a pretty good job of automatically generating API docs, but it was never per
 to include in the docs, and there just weren't enough customization options to get what I needed.
 
 Instead of generating the docs automatically, this plugin provides a simple, flexible API for analyzing and introspecting
-your python code. Using the API, you can generate reST documentation yourself however you want!
+your python code. Using the API, you can generate reST documentation yourself however you want! *Keep it simple, stupid.*
 
 I've also included a default "renderer" which will generate reST documentation automatically. You can use these if
 you are satisfied with the output and don't need any additional customization.
