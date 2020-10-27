@@ -206,10 +206,10 @@ class KissAPI(SphinxDirective):
             raise ValueError("file must be written inside out_dir") from e
         # ensure parent directories all exist
         os.makedirs(abs_dir, exist_ok=True)
-        with open(abs_path,"w") as f:
+        with open(abs_path,"w",encoding='utf-8') as f:
             f.write(content)
         # reST wants unix style paths
-        return os.path.relpath(abs_path, self.root_dir).replace('\\', '/')
+        return "/"+os.path.relpath(abs_path, self.root_dir).replace('\\', '/')
 
     _next_id = 0
     @staticmethod

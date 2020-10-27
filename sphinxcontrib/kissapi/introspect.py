@@ -22,11 +22,16 @@
     - how to handle nested classes/functions? e.g. <locals> is in qualname
 """
 
-import inspect, sys, types, weakref, enum, importlib
+import inspect, sys, types, weakref, enum, importlib, re
 from typing import Union
 from inspect import Parameter
 from collections import defaultdict
+from functools import partial, partialmethod
 
+from sphinx.ext.autodoc import (
+    PropertyDocumenter, ModuleDocumenter, AttributeDocumenter, SlotsAttributeDocumenter,
+    InstanceAttributeDocumenter, MethodDocumenter, DataDocumenter, ClassDocumenter, FunctionDocumenter
+)
 from sphinx.ext.autosummary import get_documenter, mangle_signature, extract_summary
 from sphinx.ext.autosummary import DocumenterBridge, Options
 from sphinx.pycode import ModuleAnalyzer, PycodeError
@@ -42,12 +47,12 @@ class VariableTypes(enum.IntEnum):
     DATA = 3 # catchall for anything else
     @staticmethod
     def detect_type(val):
+        if inspect.isroutine(val) or isinstance(val, (partial, partialmethod, property)):
+            return VariableTypes.ROUTINE
         if inspect.ismodule(val):
             return VariableTypes.MODULE
         if inspect.isclass(val):
             return VariableTypes.CLASS
-        if inspect.isroutine(val):
-            return VariableTypes.ROUTINE
         return VariableTypes.DATA
 
 class ClassMemberTypes(enum.IntEnum):
@@ -105,27 +110,53 @@ class InstancePlaceholder:
     """
     pass
 
+def is_special(name) -> bool:
+    """ If variable name begins with double underscore """
+    return name.startswith("__")
+def is_private(name) -> bool:
+    """ If variable name begins with single underscore """
+    return not is_special(name) and name.startswith("_")
+def parse_fqn(name) -> list:
+    """ Converts a fully qualified name into a list. First entry is always the module. Fully
+        qualified name should be in a form like so: ``module::class.member.submember``
+    """
+    fqn_split = name.split("::")
+    if len(fqn_split) > 1:
+        vars = fqn_split[1].split(".")
+        vars.insert(0, fqn_split[0])
+        return vars
+    return fqn_split
+
 class VariableValueAPI:
     """ A variable's value, along with a list of variable names and import options """
-    __slots__ = ["_value","_doc","_analyzed","package","type","refs","best_ref","ext_refs","members"]
-    def __init__(self, val, package:"PackageAPI", type:VariableTypes=None):
-        if type is None:
-            type = VariableTypes.detect_type(val)
+    __slots__ = [
+        "_value","_doc","_analyzed","package","type","refs",
+        "_source_ref","ext_refs","members","member_values"
+    ]
+    def __init__(self, val, package:"PackageAPI", vtype:VariableTypes=None):
+        if vtype is None:
+            vtype = VariableTypes.detect_type(val)
         self.package = package
         """ (PackageAPI) the package this variable belongs to """
-        self.type = type
+        self.type = vtype
         """ (VariableType) the type of this variable """
         self.refs = {}
         """ Parents which reference this variable. In the form ``{Module/ClassAPI/...: [varnames...]}`` """
         self.ext_refs = []
         """ module names not part of the package, but that include references to this variable value """
-        self.best_ref = None
-        """ The best source parent out of ``refs``. This is the object the variable's value was probably defined in;
-            the chain of `best_ref`'s makes up the fully qualified name
-        """
         self.members = {}
-        """ mapping of variable name and values for sub-members of this object """
-
+        """ Mapping of variable name to values for sub-members of this object. The values can be in any custom format,
+            in order to contain extra information about the member type and such; just depends what the subclass wants.
+            But the custom format should have some way to access the raw variable still.
+        """
+        self.member_values = {}
+        """ Unique values represented in ``members`` dict. Exact same raw member values should have the same member
+            type, the only difference being the variable reference name. This stores mappings of those raw values to 
+            the custom format stored in ``members``. Whereas ``members`` can have multiple references for each variable
+            value, this will only have one. Note, that in the case of RoutineAPI, multiple entries will be given, even
+            if the base source_ref is identical. This matches the behavior of immutables... while an integer "5" is
+            indistinguishable for two variables, we treat it as two unique references.
+        """
         if Immutable.is_immutable(val):
             val = Immutable(val)
         self._value = val
@@ -134,20 +165,55 @@ class VariableValueAPI:
         """ cached autodoc documenter """
         self._analyzed = False
         """ whether analyze_members has been called already """
+        self._source_ref = None
+
     def id(self):
         # immutable types should hash to different vals, which is why we wrap in Immutable class
         return id(self._value)
     def add_ref(self, parent:"VariableValueAPI", name):
-        """ Add a variable reference to this value. The parent should add the variable to its ``members`` dict, though
-            the format that it saves it there can be customized.
+        """ Add a variable reference to this value. This will not add the reference if the variable exclude callback
+            returns True. You can use the return value to call ``add_member` on the parent in whatever custom format
+            you desire.
 
             :param parent: the context that the value was referenced
             :param name: the variable name inside ``parent``
+            :returns: (bool) True if the reference was added
         """
+        if self.package.var_exclude(self.package, parent, self, name):
+            return False
         if parent not in self.refs:
             self.refs[parent] = [name]
         else:
             self.refs[parent].append(name)
+        return True
+    def add_member(self, name, raw_value:"VariableValueAPI", custom_value=None):
+        """ Add a member to this value. This updates ``members`` and ``member_values``
+
+            :param name: the variable reference name
+            :param raw_value: the raw value that this member represents
+            :param custom_value: The custom format we want to save to members to include extra information. If set
+                to None, it will use ``raw_value`` instead. In either case, if it detects the ``raw_value`` is already
+                in ``member_values`` it will reuse that value instead.
+        """
+        if raw_value in self.member_values:
+            custom_value = self.member_values[raw_value]
+        else:
+            if custom_value is None:
+                custom_value = raw_value
+            self.member_values[raw_value] = custom_value
+        self.members[name] = custom_value
+
+    @property
+    def source_ref(self):
+        """ The best source parent out of ``refs``. This is the object the variable's value was probably defined in;
+            the chain of `source_ref`'s makes up the fully qualified name
+        """
+        return self._source_ref
+    @source_ref.setter
+    def source_ref(self, val):
+        if val is not None and val not in self.refs:
+            raise RuntimeError("source_ref must be inside refs")
+        self._source_ref = val
     @property
     def value(self):
         """ The actual variable value """
@@ -156,45 +222,111 @@ class VariableValueAPI:
             return self._value.val
         return self._value
     @property
-    def name(self):
-        """ Return primary variable name (from best_ref), or the module name if it is a module """
+    def name(self) -> str:
+        """ Return primary variable name (from source_ref), or the module name if it is a module """
         if self.type == VariableTypes.MODULE:
             return self.value.__name__
-        # TODO: use documenter to get first declared var name? (seems to be ordered correctly already though)
-        if self.best_ref is None or not self.refs:
-            logger.error("No best_ref set for %s, %s", str(self.value), str(self.type))
-            return "NOREF({})".format(self._value)
-        v = self.refs[self.best_ref]
+        # TODO: use ``order`` to get first declared var name? (seems to be ordered correctly already though)
+        if self.source_ref is None or not self.refs:
+            val_str = str(self._value)
+            LEN_LIMIT = 25
+            if len(val_str) > LEN_LIMIT:
+                val_str = val_str[:LEN_LIMIT-3]+"..."
+            name = "anonymous<{}>".format(val_str)
+            logger.error("No source_ref set for %s", name)
+            return name
+        v = self.refs[self.source_ref]
         return v[0]
-    def __repr__(self):
-        return "<class {}:{}>".format(self.__class__.__qualname__, self._value)
     @property
     def qualified_name(self) -> str:
-        """ get full qualified name, module + variable name """
+        """ get qualified name, not including module """
+        if self.source_ref is None:
+            return ""
         n = self.name
-        if self.best_ref is not None:
-            n = "{}.{}".format(self.best_ref.name, n)
+        qn = self.source_ref.qualified_name
+        if qn:
+            return qn+"."+n
         return n
     @property
     def fully_qualified_name(self) -> str:
-        return "{}::{}".format(self.module, self.qualified_name)
+        mn = self.module
+        qn = self.qualified_name
+        if qn:
+            return "{}::{}".format(mn, qn)
+        return mn
+    @property
+    def module(self) -> str:
+        if self.type == VariableTypes.MODULE:
+            return self.name
+        if self.source_ref is not None:
+            return self.source_ref.module
+        return ""
+    def __repr__(self):
+        return "<class {}:{}>".format(self.__class__.__qualname__, self.name)
+
     def is_special(self) -> bool:
         """ If variable name begins with double underscore """
-        return self.name.startswith("__")
+        return is_special(self.name)
     def is_private(self) -> bool:
         """ If variable name begins with single underscore """
-        return not self.is_special() and self.name.startswith("_")
+        return is_private(self.name)
     def is_external(self) -> bool:
         """ If this variable is referenced outside the package. In PackageAPI.var_exclude, we assume any
             variable included outside the package was defined outside the package, so shouldn't be included in
-            the API
+            the API. Class/function/modules that are plain VariableValueAPI objects are external, by virtue
+            of their ``__module__`` value.
         """
-        return bool(self.ext_refs)
+        return (self.__class__ is VariableValueAPI and self.type != VariableTypes.DATA) or bool(self.ext_refs)
     def is_immutable(self) -> bool:
         """ whether this is an immutable type, so there would never be references of this same variable """
         return isinstance(self._value, Immutable)
+
+    def _ref_qualified_name(self, ref=None, name:str=None, allow_nosrc:bool=True):
+        if ref is None:
+            ref = self.source_ref
+            # this only works for get_documenter
+            if allow_nosrc and ref is None and self.type == VariableTypes.MODULE:
+                return (None, None, "", self.fully_qualified_name)
+        if ref not in self.refs:
+            raise ValueError("Ref is not in variables refs", self.refs, self._value)
+        if name is None:
+            name = self.refs[ref][0]
+        elif name not in self.refs[ref]:
+            raise ValueError("The ref/name combination not found in the variables refs")
+        # qualified name for this reference
+        pname = ref.qualified_name
+        mod = ref.module
+        qn = name
+        if pname:
+            qn = pname+"."+qn
+        fqn = mod+"::"+qn
+        return (ref, name, qn, fqn)
+
+    def order(self, ref=None, name:str=None):
+        """ This gives the source ordering of this variable. It will differ for each reference of the variable. It
+            works using the sphinx ModuleAnalyzer attached to ModuleAPI, so we first need a reliable ``source_ref``
+            and qualified name for the ref
+
+            :param ref: the parent reference where we're trying to get tag order
+            :param name: the variable name of the reference in ``ref``
+        """
+        ref, name, qn, fqn = self._ref_qualified_name(ref, name, False)
+        modapi = self.package.fqn_tbl.get(fqn,None)
+        oidx = float("inf")
+        if isinstance(modapi, ModuleAPI):
+            oidx = modapi.member_order(qn)
+        return (oidx, name)
+
+    def get_documenter(self, ref=None, name:str=None):
+        """ Get a sphinx documenter object for this value.
+            If ref/name are None, then it uses the first varname of ``source_ref``
+        """
+        ref, name, qn, fqn = self._ref_qualified_name(ref, name)
+        return Documenter(fqn, self, ref, name)
+
+    """   
     def documenter(self) -> "Documenter":
-        """ Get a Documenter object for this variable """
+        "" Get a Documenter object for this variable ""
         if self._doc is None:
             if self.best_ref is None:
                 self._doc = Documenter(self.name)
@@ -202,6 +334,8 @@ class VariableValueAPI:
             else:
                 self._doc = Documenter(self.best_ref.name, self.name)
         return self._doc
+    """
+
     def analyze_members(self):
         """ Analyze sub-members of this variable. This should be implemented by subclasses """
         old = self._analyzed
@@ -214,18 +348,42 @@ class RoutineAPI(VariableValueAPI):
     """
     __slots__ = ["bound_selfs","base_function"]
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.bound_selfs = []
-        """ objects the base_function was bound to, ordered"""
+        """ objects the base_function was bound to, ordered """
         self.base_function = self
         """ the base callable before being bound """
+        # since we override source_ref, we need to set up our own vars so it won't error
+        super().__init__(*args, **kwargs)
+
         self.package.fqn_tbl[self.fully_qualified_name] = self
+        self._source_ref = None
+
+    @property
+    def name(self) -> str:
+        return self.qualified_name.rsplit(".", 1)[-1]
     @property
     def qualified_name(self) -> str:
         return self.base_function.value.__qualname__
     @property
     def module(self) -> str:
         return self.base_function.value.__module__
+    @property
+    def source_ref(self):
+        """ overrides VariableValueAPI.source_ref to retrieve the source of the base source function,
+            rather than the bound method
+        """
+        return self.base_function._source_ref
+    @source_ref.setter
+    def source_ref(self, val):
+        """ the source_ref may not actually be in refs yet for root functions of RoutineAPI; this happens
+            if the actual ref (qualified name) is a bound method, and we're just pretending the true source
+            is the underlying function
+        """
+        # source must be in a bound parent's refs, or the base function's refs
+        base = self.base_function
+        if not (val in base.refs or any(val in r.refs for r in base.refs if isinstance(r, RoutineAPI) and r.base_function is base)):
+            raise RuntimeError("source_ref is not base function or bound method refs")
+        self.base_function._source_ref = val
     def analyze_members(self):
         """ Analyze root function of the routine. This extracts out any class/object bindings so that
             we can examine the base function that eventually gets called
@@ -233,22 +391,40 @@ class RoutineAPI(VariableValueAPI):
         if super().analyze_members(): return
         root = self.value
         while True:
-            parent = getattr(root, "__self__", None)
-            if parent is None:
+            # different types have different names for the underlying function
+            if isinstance(root, property):
+                func = "fget"
+            elif isinstance(root, (partial, partialmethod)):
+                func = "func"
+            else:
+                func = "__func__"
+            if not hasattr(root, func):
                 break
-            par_vv = self.package.add_variable(parent)
-            # don't have a variable name for this reference, but we do have bound index
-            idx = len(self.bound_selfs)
-            par_vv.add_ref(self, idx)
-            self.bound_selfs.append(par_vv)
-            root = getattr(root, "__func__")
+            if hasattr(root, "__self__"):
+                parent = root.__self__
+                par_vv = self.package.add_variable(parent)
+                # don't have a variable name for this reference, but we do have bound index
+                idx = len(self.bound_selfs)
+                # TODO: should we add bound index here? I think for now no, and we
+                par_vv.add_ref(self, "__self__")
+                self.bound_selfs.append(par_vv)
+            root = getattr(root, func)
+
         if root is not self.value:
             root_vv = self.package.add_variable(root)
             root_vv.add_ref(self, "__func__")
             self.base_function = root_vv
+    def is_bound(self):
+        """ Whether this is a bound method for another root function. For example, a class method
+            is a function that is bound to the class; so there are two objets, the function and the bound method.
+            When analyze_members is called on a bound routine, it will drill down to the root function and add
+            it as a separate RoutineAPI variable, or plain VariableValueAPI if it was an external function.
+        """
+        return self.base_function is not self
 
 class ClassAPI(VariableValueAPI):
     """ Specialization of VariableValueAPI for class types. This will autodetect methods and attributes """
+    instance_finder = re.compile(r"\s+self\.(\w+)\s*=")
     __slots__ = ["attrs"]
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -257,6 +433,9 @@ class ClassAPI(VariableValueAPI):
             items: ``type``, ``binding``, ``reason``, and ``value``. See :meth:`~classify_members` for details
         """
         self.package.fqn_tbl[self.fully_qualified_name] = self
+    @property
+    def name(self) -> str:
+        return self.qualified_name.rsplit(".",1)[-1]
     @property
     def qualified_name(self) -> str:
         return self.value.__qualname__
@@ -271,25 +450,42 @@ class ClassAPI(VariableValueAPI):
         raw_attrs = self.classify_members()
         cont_mod = self.package.fqn_tbl[self.module]
         raw_inst_attrs = cont_mod.instance_attrs(self.qualified_name)
+        # ModuleAnalyzer can't say if it is an instance method
+        # this parses source code looking for "self.XXX", and we'll assume those are instance attributes
+        inst_eligible = set()
+        init = getattr(self.value, "__init__", None)
+        if init is not None:
+            try:
+                src = inspect.getsource(init)
+                inst_eligible = set(ClassAPI.instance_finder.findall(src))
+            except: pass
         for k in raw_inst_attrs:
-            # this may override __slots__ members, but that's okay
-            # we'll assume ModuleAnalyzer has better info about the docs, so we'll let it take priority
-            raw_attrs[k] = {
-                "type": "data", # technically, could be function, but we can't know for sure
-                "binding": "instance",
-                "reason": "moduleanalyzer",
-                "value": InstancePlaceholder()
-            }
+            isinst = k in inst_eligible
+            if k in raw_attrs:
+                old = raw_attrs[k]
+                # we know it is being used as instance variable now
+                if isinst and old["binding"] != ClassMemberBindings.INSTANCE and old["type"] == ClassMemberTypes.DATA:
+                    old["binding"] = ClassMemberBindings.INSTANCE
+                    old["reason"] = "moduleanalyzer"
+            # not seen before
+            else:
+                raw_attrs[k] = {
+                    "type": ClassMemberTypes.DATA, # technically, could be function, but we can't know for sure
+                    "binding": ClassMemberBindings.INSTANCE if isinst else ClassMemberBindings.STATIC,
+                    "reason": "moduleanalyzer",
+                    "value": InstancePlaceholder()
+                }
         # convert attributes to vvapis
         for k,v in raw_attrs.items():
             vv = self.package.add_variable(v["value"])
-            vv.add_ref(self, k)
-            is_inner = isinstance(vv, ClassAPI) and vv.fully_qualified_name.startswith(self.fully_qualified_name+".")
-            # classify_members gives some extra info that is redundant, so we create our own dict
-            self.members[k] = ClassMember(
-                ClassMemberTypes.INNERCLASS if is_inner else v["type"],
-                v["binding"], vv, v["reason"]
-            )
+            if vv.add_ref(self, k):
+                is_inner = isinstance(vv, ClassAPI) and vv.fully_qualified_name.startswith(self.fully_qualified_name+".")
+                # classify_members gives some extra info that is redundant, so we create our own dict
+                cust_val = ClassMember(
+                    ClassMemberTypes.INNERCLASS if is_inner else v["type"],
+                    v["binding"], vv, v["reason"]
+                )
+                self.add_member(k, vv, cust_val)
 
     def classify_members(self):
         """ Retrieve attributes and their types from a class. This does a pretty thorough examination of the attribute
@@ -331,11 +527,14 @@ class ClassAPI(VariableValueAPI):
             """
             slots = set()
             raw_slots = getattr(cls, "__slots__", None)
-            if raw_slots is not None and len(slots):
-                for attr in iter(slots):
-                    if attr == "__dict__" or attr == "__weakref__":
-                        continue
-                    slots.add(attr)
+            if raw_slots is not None:
+                if isinstance(raw_slots, str):
+                    raw_slots = [raw_slots]
+                if len(slots):
+                    for attr in iter(slots):
+                        if attr == "__dict__" or attr == "__weakref__":
+                            continue
+                        slots.add(attr)
 
             # figure out what type of attribute this is
             binding = None
@@ -348,11 +547,11 @@ class ClassAPI(VariableValueAPI):
                 parents = []
                 root_fn = bound_val
                 while True:
-                    parent = getattr(root_fn, "__self__", None)
-                    if parent is None:
+                    if not hasattr(root_fn, "__func__"):
                         break
-                    parents.append(parent)
-                    root_fn = getattr(root_fn, "__func__")
+                    if hasattr(root_fn, "__self__"):
+                        parents.append(root_fn.__self__)
+                    root_fn = root_fn.__func__
                 binding = {
                     "type":ClassMemberTypes.METHOD,
                     "source": source(root_fn),
@@ -426,20 +625,20 @@ class ClassAPI(VariableValueAPI):
                 binding.update(extras)
             elif isinstance(val, property):
                 binding = {
-                    "type": ClassMemberTypes.METHOD,
+                    "type": ClassMemberTypes.DATA,
                     "binding": ClassMemberBindings.INSTANCE,
                     "reason":"property",
                     "source": source(val.fget)
                 }
             elif var in slots:
                 binding = {
-                    "type":ClassMemberTypes.METHOD,
+                    "type":ClassMemberTypes.DATA,
                     "binding": ClassMemberBindings.INSTANCE,
                     "reason":"slots"
                 }
             else:
                 binding = {
-                    "type":ClassMemberTypes.METHOD,
+                    "type":ClassMemberTypes.DATA,
                     "binding":ClassMemberBindings.STATIC,
                     "reason":"other"
                 }
@@ -453,11 +652,17 @@ class ModuleAPI(VariableValueAPI):
         list of importable variables, those that were defined within the module and those that were not. This
         class also holds a ``ModuleAnalyzer``, which can be used to get documentation for class instance attributes.
     """
-    __slots__ = ["imports","analyzer"]
+    __slots__ = ["imports","maybe_imports","analyzer"]
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.imports = set()
         """ list of modules this module imports; only includes modules part of the package """
+        self.maybe_imports = set()
+        """ List of modules that were accessed in someway to reference a class or routine. We can't be 100% sure this
+            module accessed directly, its just a guess. There's no way to detect ``from x import y`` without analyzing
+            source code. For variable's whose source is ambiguous, we can use these possible imports to guess at which
+            refs are the true source.
+        """
         # source code analysis; this gives you extra info like the estimated order variables were defined in source file
         try:
             self.analyzer = ModuleAnalyzer.for_module(self.name)
@@ -470,18 +675,18 @@ class ModuleAPI(VariableValueAPI):
             self.analyzer = None
 
     @property
-    def fully_qualified_name(self) -> str:
+    def name(self) -> str:
         return self.module
     @property
     def qualified_name(self) -> str:
-        return self.module
+        return ""
     @property
     def module(self) -> str:
         return self.value.__name__
 
     def __repr__(self):
         return "<class ModuleAPI:{}>".format(self.name)
-    def order(self, name) -> tuple:
+    def member_order(self, name) -> float:
         """ Get the source ordering. This is not the line number, but a rank indicating which the order variables
             were declared in the module.
 
@@ -489,10 +694,8 @@ class ModuleAPI(VariableValueAPI):
                 was not found in the source module), +infinity is used instead
         """
         if self.analyzer is not None:
-            o = self.analyzer.tagorder.get(name, float("inf"))
-        else:
-            o = float("inf")
-        return (o, name)
+            return self.analyzer.tagorder.get(name, float("inf"))
+        return float("inf")
     def instance_attrs(self, name) -> list:
         """ Get a list of documented instance-level attributes for object `name` (e.g. Class/enum/etc) """
         if self.analyzer is None:
@@ -519,13 +722,14 @@ class ModuleAPI(VariableValueAPI):
         for var, val in inspect.getmembers(self.value):
             vv = self.package.add_variable(val)
             # add reference to this module
-            vv.add_ref(self, var)
+            if vv.add_ref(self, var):
+                self.add_member(var, vv)
             # this module imports another in the package
             if isinstance(vv, ModuleAPI):
                 self.imports.add(vv)
 
 class PackageAPI:
-    __slots__ = ["name","package","mods_tbl","ext_tbl","var_tbl","fqn_tbl","_need_analysis"]
+    __slots__ = ["name","package","mods_tbl","ext_tbl","var_tbl","fqn_tbl","var_exclude","_need_analysis"]
     def __init__(self, pkg: types.ModuleType, options:dict={}):
         """ Parse a root module and extract the API for it inside [XXX]API classes """
         # find all modules that are part of this package
@@ -546,8 +750,15 @@ class PackageAPI:
         self.package = self.add_variable(pkg, True)
         """ The module entry-point for the package. Also accessible as first element of `modules` """
 
+        noop_cbk = lambda *args: False
+        def get_cbk(name, default):
+            cbk = options.get(name, default)
+            return noop_cbk if cbk is None else cbk
+
+        package_exclude = get_cbk("package_exclude", PackageAPI.default_package_exclude)
+        self.var_exclude = get_cbk("var_exclude", PackageAPI.default_var_exclude)
+
         # get package modules
-        package_exclude = options.get("package_exclude",PackageAPI.package_exclude)
         # examining modules can sometimes lazy load others
         mods_seen = set()
         while True:
@@ -574,52 +785,92 @@ class PackageAPI:
             for vv in to_analyze:
                 vv.analyze_members()
 
+        def dont_resolve(vv):
+            # external, source_ref already set elsewhere (probably by class itself), no refs, or ModuleAPI
+            return vv.is_external() or vv.source_ref is not None or not vv.refs or isinstance(vv, ModuleAPI)
         # we've indexed all variables and imports; now we guess source definition qualname of variables
-        var_exclude = options.get("var_exclude",PackageAPI.var_exclude)
-        source_object = options.get("source_object", PackageAPI.source_object)
+        # Routine/ClassAPI are functions/classes defined within the package, so have qualname that can be used to set the best reference
         for vv in self.var_tbl.values():
-            """ first, determine what the best source module is for a variable (where variable was defined);
-                modules are their own source, so doesn't make sense to set it for module types;
-                class/functions have __module/qualname__ reference they use to set best reference, so all that's left
-                is DATA types
-            """
-            need_source_resolution = vv.type == VariableTypes.DATA
+            if dont_resolve(vv):
+                continue
             if isinstance(vv, (RoutineAPI, ClassAPI)):
                 # qualname is guaranteed to be within package's allowed modules, since otherwise we would have made it DATA type
-                name = vv.module
+                name = module = vv.module
                 attr_split = vv.qualified_name.rsplit(".",1)
                 if len(attr_split) > 1:
                     name += "::"+attr_split[0]
                 # type is nested inside function, so not importable directly; it must have been referenced in some
                 # accessible way, or is bound to a RoutineAPI which is accessible; so defer to source resolution to
                 # figure out what the best ref is for these
-                if "<locals>" in name:
-                    print("FOUND LOCALS IN THINGY", name)
-                    need_source_resolution = True
-                elif name not in self.fqn_tbl:
-                    raise RuntimeError("Variable has importable qualname {}, but {} not found".format(vv.fully_qualified_name, name))
-                else:
-                    vv.best_ref = self.fqn_tbl[name]
-                    print("Found: /{}/, /{}/".format(vv.fully_qualified_name, vv.best_ref))
-                    if vv.best_ref not in vv.refs:
-                        print("Bad")
-                        print(vv.best_ref)
-                        print(vv.refs)
-                        raise RuntimeError("not in refs though")
-            if need_source_resolution:
-                # DATA variable defined in multiple modules; have to do some more in depth analysis
-                # to determine which module is the "true" source of the variable
-                if len(vv.refs) > 1:
-                    vv.best_ref = source_object(self.name, vv)
-                else:
-                    vv.best_ref = next(iter(vv.refs))
-            """ we have a module assignment, so we can get the "official" variable name and docs;
-                user can use those to determine if the variable should be included or not
-                user already accepted package modules for inclusion in package_exclude callback
+                if "<locals>" not in name:
+                    if name not in self.fqn_tbl:
+                        raise RuntimeError("Variable has importable qualname {}, but {} not found".format(vv.fully_qualified_name, name))
+                    else:
+                        vv.source_ref = self.fqn_tbl[name]
+
+                # update "maybe imports" for anything that referenced this variable
+                vv_mod = self.mods_tbl[module]
+                for r in vv.refs.keys():
+                    m = r.module
+                    if m and m != module and m in self.mods_tbl:
+                        self.mods_tbl[m].maybe_imports.add(vv_mod)
+
+        for vv in self.var_tbl.values():
+            """ first, determine what the best source module is for a variable (where variable was defined);
+                Unfortunately, it is not possible to really tell *where* a variable came from (see https://stackoverflow.com/questions/64257527/).
+                A module's members may have been imported from another module, so you can't say exactly what module a variable
+                belongs to. Or if a variable is the same across multiple classes, which class was it defined in initially?
+                So you have to make some assumptions.
                 
-                TODO: move this to member iterator methods
+                - modules are their own source, so doesn't make sense to set it for module types
+                - external variables don't need best source, since it is defined externally; user can choose to
+                  document each reference individually, or just mark it as external
+                All that is left is DATA types, which we do an analysis of the graph of module imports
+                
+                DATA variable defined in multiple modules; have to do some more in depth analysis
+                to determine which module is the "true" source of the variable.
+                
+                Some of cases needed to resolve:
+                - variable set in multiple classes, modules, or both
+                - data variables in external modules, e.g. val = ext_dict["attr"]; no way to detect that as from
+                  an external module
+                - routines/classes defined in <locals>
+                
+                ref can be module, class, or routine; for now we'll ignore routine's, since those are either
+                1) a bound self 2) external function 3) <locals> function. If user needs source_ref, they
+                can pick one manually
             """
-            #if not isinstance(vv, ModuleAPI) and var_exclude(self.name, vv):
+            if dont_resolve(vv):
+                continue
+            crefs = list(r for r in vv.refs if isinstance(r, ClassAPI))
+            mrefs = list(r for r in vv.refs if isinstance(r, ModuleAPI))
+            # convert crefs to modules temporarily
+            mod_refs = defaultdict(list)
+            for m in mrefs:
+                mod_refs[m].append(m)
+            for c in crefs:
+                if c.module in self.mods_tbl:
+                    mod_refs[self.mods_tbl[c.module]].append(c)
+            mod_lst = list(mod_refs.keys())
+            # can't specify source... probably bound to a routine or something, but not referenced elsewhere
+            if not mod_lst:
+                continue
+            if len(mod_lst) > 1:
+                best_mod = self.module_import_analysis(vv.value, mod_lst)
+            else:
+                best_mod = mod_lst[0]
+            # we have our guess for module that it came from, now pick a class
+            # if it is referenced in the actual module, then we'll assume it was defined there, and then
+            # referenced inside the class, rather than the other way around
+            refs = mod_refs[best_mod]
+            if refs[0] is best_mod:
+                vv.source_ref = best_mod
+            elif len(refs) == 1:
+                vv.source_ref = refs[0]
+            else:
+                # class which is referenced the most times
+                refs.sort(key=lambda m: (-sum(len(l) for l in m.refs.values()), m.qualified_name))
+                vv.source_ref = refs[0]
 
     def add_external_module(self, mod_name:str):
         """ Mark all variables from the module given as "external" variables, outside the package
@@ -654,26 +905,21 @@ class PackageAPI:
 
         vtype = VariableTypes.detect_type(val)
         clazz = VariableValueAPI
-        # class/function have __module__ we can set as best_ref
-        best_ref = None
         if vtype == VariableTypes.MODULE:
             if package_module:
                 clazz = ModuleAPI
             else:
                 package_module = False
-        # class/function that are not one of the package's modules will be converted
-        # to DATA type, since we won't want to document externally defined stuff in this package
+        # class/function that are not one of the package's modules will not use subclass specialization
         elif vtype != VariableTypes.DATA:
             try:
-                best_ref = self.mods_tbl.get(val.__module__, None)
-                if best_ref is None:
-                    vtype = VariableTypes.DATA
-            except:
-                vtype = VariableTypes.DATA
-        if vtype == VariableTypes.CLASS:
-            clazz = ClassAPI
-        elif vtype == VariableTypes.ROUTINE:
-            clazz = RoutineAPI
+                mod = self.mods_tbl.get(val.__module__, None)
+                if mod is not None:
+                    if vtype == VariableTypes.CLASS:
+                        clazz = ClassAPI
+                    elif vtype == VariableTypes.ROUTINE:
+                        clazz = RoutineAPI
+            except: pass
         # create
         vv = clazz(val, self, vtype)
         vv_id = vv.id()
@@ -692,7 +938,7 @@ class PackageAPI:
 
     # Following methods are default options
     @staticmethod
-    def package_exclude(pkg_name:str, module_name:str):
+    def default_package_exclude(pkg_name:str, module_name:str):
         """ Default package module exclusion callback. This ignores modules that are:
 
             - outside pkg_name scope: don't begin with "[pkg_name]."
@@ -709,60 +955,52 @@ class PackageAPI:
         if not isinstance(sys.modules[module_name], types.ModuleType):
             return True
     @staticmethod
-    def var_exclude(pkg_name:str, var:VariableValueAPI):
+    def default_var_exclude(pkg, parent, value, name):
         """ Default variable exclusion callback. This ignores variables that are:
 
-            - private: variable begins with single underscore (see :meth:`~VariableValueAPI.is_private`)
+            - private: variable begins with single underscore (see :meth:`is_private`)
             - external: variable found outside the package modules, and so we assume was defined outside as well
               (see :meth:`~VariableValueAPI.is_external`)
-            - special: variable begins with double underscore (see :meth:`~VariableValueAPI.is_special`); this allows
-              two exceptions, ``__all__`` and ``__version__`` within the ``pkg_name`` module
+            - special: variable begins with double underscore (see :meth:`is_special`); this allows
+              ``__all__`` and ``__version__`` within the ``__init__`` module, and also non-inherited class methods
         """
-        if var.is_private() or var.is_external():
+        class_mbr = isinstance(parent, ClassAPI)
+        if is_private(name) or (not class_mbr and value.is_external()):
             return True
+
         # allow __all/version__ for the package module itself
         special_include = ["__all__","__version__"]
-        if var.is_special():
-            allowed = var.name in special_include and any(mod.name == pkg_name for mod in var.refs)
-            return not allowed
+        if is_special(name):
+            allowed_init = name in special_include and parent is pkg.package
+            allowed_override = class_mbr and isinstance(value, RoutineAPI)
+            return not (allowed_init or allowed_override)
     @staticmethod
-    def source_object(pkg_name:str, vv:VariableValueAPI):
-        """ Default source object resolution callback.
-            Unfortunately, it is not possible to really tell *where* a variable came from (see https://stackoverflow.com/questions/64257527/).
-            A module's members may have been imported from another module, so you can't say exactly what module a variable
-            belongs to. Or if a variable is the same across multiple classes, which class was it defined in initially?
-            So you have to make some assumptions. Here's what I'll do:
-
-            - assume any ModuleType's inside a module, that are also in sys.modules, were imported
-            - if a function or class has __module__ attribute, then assume variable came from that module
-            - if variable is referenced in both a ClassAPI and ModuleAPI:
-                - if the variable is bound to a class (__self__
-              manually set as a class instance, e.g. via
-            - for all other variables, keep a list of references to the modules in sys.modules which contain that variable
-                - if there's just one module, that is the one that it belongs to
-                - construct a graph of module imports using the list of refs we collected
-                - merge cycles into meta-nodes
-                - (meta)nodes with no incoming edges (zero (meta)dependencies) are candidates for the source
-                - if there's just one, that is the one it belongs to
-                - If there are more than one (meta)node, it might mean there is another module which created the variable,
-                  but did not export it; for example, `from x import y; z = y.attribute`, here y.attribute is not exported
-                  explicitly. What to do in this scenario? You probably want to reference the module that exported it, not
-                  the actual source of the variable, which you wouldn't be able to import from. I think best thing to
-                  do is pretend there were a cycle between all resulting (meta)node's and treat them together
-                - Now we have a collection of equally valid modules and need to decide which to say is the source import:
-                    1. if the variable type/class/bound function/etc has __module__ which is one of the candidate nodes, say
-                       it is that one
-                    2. pick the module with the most outgoing edges (imported by the most modules)
-                    3. being equal, go by least incoming edges (has fewest dependencies)
-                    4. pick an arbitrary module (perhaps the one that comes first alphabetically to be deterministic)
+    def module_import_analysis(value, modules:list):
+        """ module import analysis, for determining source declaration of variable
+            - if there's just one module, that is the one that it belongs to
+            - construct a graph of module imports using the list of refs we collected
+            - merge cycles into meta-nodes
+            - (meta)nodes with no incoming edges (zero (meta)dependencies) are candidates for the source
+            - if there's just one, that is the one it belongs to
+            - If there are more than one (meta)node, it might mean there is another module which created the variable,
+              but did not export it; for example, `from x import y; z = y.attribute`, here y.attribute is not exported
+              explicitly. What to do in this scenario? You probably want to reference the module that exported it, not
+              the actual source of the variable, which you wouldn't be able to import from. I think best thing to
+              do is pretend there were a cycle between all resulting (meta)node's and treat them together
+            - Now we have a collection of equally valid modules and need to decide which to say is the source import:
+                1. if the variable type/class/bound function/etc has __module__ which is one of the candidate nodes, say
+                   it is that one
+                2. pick the module with the most outgoing edges (imported by the most modules)
+                3. being equal, go by least incoming edges (has fewest dependencies)
+                4. pick an arbitrary module (perhaps the one that comes first alphabetically to be deterministic)
 
             TODO: filter the candidate modules by those that contain documentation on the variable?
-            TODO: prefer ModuleAPI over ClassAPI if defined in both
         """
         # already handled the first two cases in __init__, so all the rest are DATA type
         # those could be primitives, class instances, etc
         class AtomicNode:
             """ a node in the import graph """
+            __slots__ = ["modapi","out_ct","in_ct","in_nodes"]
             def __init__(self, m):
                 self.modapi = m
                 self.out_ct = 0 # stuff that imports m
@@ -771,6 +1009,7 @@ class PackageAPI:
                 # it doesn't necessarily match up with in_ct, since things may have merged into MetaNode's
                 self.in_nodes = set()
         class MetaNode:
+            __slots__ = ["nodes", "in_nodes"]
             def __init__(self, merge):
                 self.nodes = set()
                 self.in_nodes = set()
@@ -780,18 +1019,18 @@ class PackageAPI:
                         self.nodes.update(n.nodes)
                     else:
                         self.nodes.add(n)
-                    self.in_nodes.update(n.edge_in)
+                    self.in_nodes.update(n.in_nodes)
                 self.in_nodes -= self.nodes
 
         graph_nodes = set()
         graph_nodes_lookup = {}
         # construct nodes and edges
-        for m in vv.refs.keys():
+        for m in modules:
             node = AtomicNode(m)
             graph_nodes.add(node)
             graph_nodes_lookup[m] = node
         for node in graph_nodes:
-            for mi in node.modapi.imports:
+            for mi in (node.modapi.imports | node.modapi.maybe_imports):
                 if mi in graph_nodes_lookup:
                     mi_node = graph_nodes_lookup[mi]
                     mi_node.out_ct += 1
@@ -851,7 +1090,7 @@ class PackageAPI:
         # otherwise we had cyclical module dependencies, or var came from a non-exported var of a shared module
         # first check if a the variable type came from one of the modules
         cnames = {m.modapi.name : m.modapi for m in candidates}
-        obj = vv.value
+        obj = value
         while type(obj) != type:
             obj = type(obj)
             if hasattr(obj, "__module__") and obj.__module__ in cnames:
@@ -876,48 +1115,63 @@ class Documenter:
         cls.directive = directive
         cls.options = DocumenterBridge(directive.env, directive.state.document.reporter, Options(), directive.lineno, directive.state)
 
-    __slots__ = ["module_name","var_name","short_name","module","value","doc"]
+    __slots__ = ["ref","name","fqn","value","doc"]
 
-    def __init__(self, module_name:str, var_name:str=None):
+    def __init__(self, fqn:str, value, ref, name:str):
         """ Retrieves the same kind of "Documenter" object that autodoc would use to document this variable
-            Pass in the directive class, which autodoc wants, which should includde an additional "bridge"
-            attribute with DocumenterBridge options
+
+            :param fqn: fully qualified variable name
+            :param value: VariableValueAPI of variable
+            :param ref: parent reference for variable
+            :param name: variable name used for reference; can be None, in which case it will just document value
+                directly, as though it were not attached to any
         """
         if Documenter.directive is None or Documenter.options is None:
             raise RuntimeError("must call bind_directive before Documenter will work")
 
-        # if var_name not given, then we document the module instead
-        self.module_name = module_name
-        self.var_name = var_name
-        self.short_name = var_name or module_name
-        self.module = sys.modules[module_name]
-        if var_name is None:
-            self.value = None
-            value = self.module
-            parent = None
-            full_name = self.module_name
+        self.ref = ref
+        self.name = name
+        self.fqn = fqn
+        self.value = value
+
+        # determine autodoc documenter class type
+        if isinstance(value.value, property):
+            t = PropertyDocumenter
+        elif isinstance(ref, ClassAPI) and name is not None:
+            extra = ref.members[name]
+            r = extra.reason
+            if r == "moduleanalyzer" and extra.binding == ClassMemberBindings.INSTANCE:
+                t = InstanceAttributeDocumenter
+            elif r == "slots":
+                t = SlotsAttributeDocumenter
+            elif extra.type == ClassMemberTypes.METHOD and isinstance(value, RoutineAPI):
+                t = MethodDocumenter
+            elif extra.type == ClassMemberTypes.INNERCLASS and isinstance(value, ClassAPI):
+                t = ClassDocumenter
+            else:
+                t = AttributeDocumenter
+        elif isinstance(value, RoutineAPI):
+            t = FunctionDocumenter
+        elif isinstance(value, ClassAPI):
+            t = ClassDocumenter
+        elif isinstance(value, ModuleAPI):
+            t = ModuleDocumenter
         else:
-            self.value = getattr(self.module, var_name)
-            value = self.value
-            parent = self.module
-            full_name = "{}::{}".format(module_name, var_name)
+            t = DataDocumenter
 
         # The rest here was copied/adapted from autosummary source code
-        doc_type = get_documenter(Documenter.directive.env.app, value, parent)
-        self.doc = doc_type(Documenter.options, full_name)
+        self.doc = t(Documenter.options, fqn)
         if not self.doc.parse_name():
-            raise RuntimeError("documenter parse_name failed: {}".format(full_name))
+            raise RuntimeError("documenter parse_name failed: {}".format(fqn))
         if not self.doc.import_object():
-            raise RuntimeError("documenter import_object failed: {}".format(full_name))
-        # autosummary does a check to make sure it is exported; we know it is already
-        # source code analysis; this gives you extra info like the estimated order variables were defined in source file
-        try:
-            # we have more intelligent info on the target module
-            self.doc.analyzer = ModuleAnalyzer.for_module(self.module_name)
-            self.doc.analyzer.find_attr_docs()
-        except PycodeError as e:
-            logger.warning("could not analyze module for documenter: %s", full_name, exc_info=e)
-            self.doc.analyzer = None
+            print(self.doc.module, self.doc.name, t)
+            print(self.ref, self.name, self.fqn, self.value, self.value.source_ref)
+            raise RuntimeError("documenter import_object failed: {}".format(fqn))
+
+        mod_name = fqn.split("::", 1)[0]
+        mod = value.package.fqn_tbl.get(mod_name, None)
+        if isinstance(mod, ModuleAPI):
+            self.doc.analyzer = mod.analyzer
 
     def summary(self, max_name_chars:int=50):
         """ Gets doc summary, as would be returned by autosummary extension
@@ -934,7 +1188,7 @@ class Documenter:
         if not sig:
             sig = ''
         else:
-            max_chars = max(5, max_name_chars-len(self.short_name))
+            max_chars = max(5, max_name_chars-len(self.name))
             sig = mangle_signature(sig, max_chars=max_chars)
         # don't know what this line does, but if not there extract_summary doesn't work
         # guess extract_summary is writing docutils nodes to the autodoc documenter object
@@ -942,10 +1196,15 @@ class Documenter:
         self.doc.add_content(None)
         summary = extract_summary(Documenter.options.result.data[:], Documenter.directive.state.document)
         return {
-            "name": self.short_name,
             "signature": sig,
             "summary": summary
         }
+
+    def documentation(self):
+        """ Returns full reST docs, as would be returned by autodoc """
+        out = Documenter.options.result = StringList()
+        self.doc.generate()
+        return out
 
     def order(self, name=None):
         """ Get relative order index that this variable was declared
@@ -957,25 +1216,33 @@ class Documenter:
                 to ordering alphabetically in that case
         """
         if name is None:
-            name = self.var_name
-        return (self.doc.analyzer.tagorder.get(name, float("inf")), self.short_name)
+            name = self.fqn
+            ns = name.split("::",1)
+            name = "" if len(ns) < 2 else ns[1]
+        return (self.doc.analyzer.tagorder.get(name, float("inf")), self.name)
 
 """
-# this looks like how it can generate docs for self.xxx of class
-analyzer = ModuleAnalyzer.for_module(self.modname)
-attr_docs = analyzer.find_attr_docs()
-
-# if object is not in attr_docs, it falls back to getdoc method
-# that I think just gets __doc__ string
-
-# autodoc Documenters want to generate reST content
-doc.add_content(additional_content, don't_include_docstring)
-
-# will return 
-doc.process_doc
-
+How autodoc gets documentation for objects
+Entry point is Documenter.add_content(additional_content, don't_include_docstring)
+AttributeDocumenter: calls with no docstring if not a data descriptor
+    1. first check module analyzer, analyzer.find_attr_docs
+    2. if not in attr_docs, use self.get_doc
+        getdoc + prepare_docstring methods
+        getdoc specialization:
+        - ClassDocumenter: it will get from __init__ or __new__ instead
+        - SlotsDocumenter: if slots is a dict, treats key as the docstring
+        Otherwise, getdoc is pretty simple actually, it grabs __doc__; if it is a partial method, it will
+        get from func instead; if inherited option is allowed, it walks up the mro and finds __doc__
+    3. run self.process_doc on every line of docs, then append to StringList()
+        doesn't do much, but emits event so extensions can preprocess docs
+        
+    signature is the header:
+    self.format_signature()
+    self.add_directive_header(sig)
+    
+Although the doc stuff looks fine, the format_signature method is specialized for almost all classes, and
+gets pretty complicated. So for now, I'll just use the autodoc classes
 """
-
 
 pkg_memoize = {}
 def analyze_package(pname:str, *args, **kwargs):

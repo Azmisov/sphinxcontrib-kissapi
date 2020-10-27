@@ -15,7 +15,7 @@
     :class: kiss-summary
 
     {% for vdef in vars -%}
-    * - :obj:`{{ vdef["display_name"] }} <{{ vdef["qualified_name"] }}>`
+    * - :obj:`{{ vdef["name"] }} <{{ vdef["source"] }}>`
         {%- if vdef["signature"] %}\ *{{ vdef["signature"] }}*\ {%+ endif %}
 
         {%- if vdef["aliases"] %}
@@ -28,16 +28,10 @@
         {{ conditional_class(vdef["aliases"]|length > 2, "kissapi_wrap", alias_block)|indent(8) }}
         {%- endif %}
 
-        {%- if vdef["module"] %}
-        {%- set different_name = (vdef["display_name"] != vdef["name"]) and not vdef["is_module"] %}
-{% set source_block %}
-**Source:**
-{%- if different_name %}
-``{{ vdef["name"] }}`` from
-{%- endif %}
-:mod:`~{{ vdef["module"] }}`
-{% endset %}
-        {{ conditional_class(different_name, "kissapi_wrap", source_block)|indent(8) }}
+        {%- if not vdef["defined"] %}
+
+        **Source:**
+        :obj:`{{ vdef["source_short"] }} <{{ vdef["source"] }}>`
         {%- endif %}
       - {{ vdef["summary"] }}
     {% endfor %}

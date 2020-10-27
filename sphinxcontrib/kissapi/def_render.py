@@ -1,87 +1,178 @@
-from .introspect import VariableTypes
+import re
+from collections import defaultdict
+from .introspect import (
+    VariableTypes, ClassMemberTypes, ClassMemberBindings, parse_fqn, logger,
+    VariableValueAPI, RoutineAPI, ClassAPI, ModuleAPI
+)
 
-type_order = [
-    # (type, title)
-    (VariableTypes.MODULE, "Modules"),
-    (VariableTypes.DATA, "Variables"),
-    (VariableTypes.CLASS, "Classes"),
-    (VariableTypes.ROUTINE, "Functions")
-]
-""" Ordering of VariableTypes for doc pages, along with the type titles """
+def capitalize(name):
+    return name[0].upper() + name[1:]
 
-def var_summaries(cur_mod, types, src_order=True):
-    """ Get summarized information for variables, categorized and sorted by type """
-    out = []
-    for vtype,title in type_order:
-        if vtype not in types: continue
-        # list of variables of this type
-        vlst = []
-        for vv in types[vtype]:
-            d = vv.documenter()
-            s = d.summary()
-            is_module = vtype == VariableTypes.MODULE
-            # docs ordering; for module imports, alphabetical makes more sense
-            s["order"] = d.order() if src_order and not is_module else s["name"]
-            # path to the actual value definition
-            s["qualified_name"] = vv.qualified_name
-            # variable names from this module
-            s["display_name"] = vv.refs[cur_mod][0]
-            if len(vv.refs[cur_mod]) > 1:
-                s["aliases"] = [x for x in vv.refs[cur_mod] if x != s["name"]]
-            # defined in different module
-            # if its a module with same name as module, we won't include this extra info
-            if is_module and s["display_name"] != vv.name.rsplit(".", 1)[-1]:
-                s["module"] = vv.name
-                # this indicates that we don't need to put the source variable name, since source = variable
-                s["is_module"] = True
-            elif vv.best_ref and vv.best_ref != cur_mod:
-                s["module"] = vv.best_ref.name
-                # this allows it to put "Source: varname from module", if varname differs from cur_mod's varname
-                s["is_module"] = False
-            vlst.append(s)
-        vlst.sort(key=lambda x: x["order"])
-        out.append({
-            "title": title,
-            "type": vtype,
-            "vars": vlst
+def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_external=False):
+    """ Takes a module and organizes its members into sections
+        :param obj: object whose members we want to categorize
+        :param cat_cbk: callback to categorize a member, cbk(vardata, member_info)
+        :param title_cbk: category -> category title callback, cbk(category)
+    """
+    # {category: [{... vardata ...}]}
+    data = defaultdict(list)
+    for vv, extra in obj.member_values.items():
+        # context filter
+        if not include_external and vv.is_external():
+            continue
+        src = vv.source_ref
+        if src is None and vv.type != VariableTypes.MODULE:
+            logger.warning("No source for variable:", vv.name)
+        imported = src is not obj
+        if not include_imports and imported:
+            continue
+        assert obj in vv.refs, "Object should be in variables refs to be in members!"
+        aliases = vv.refs[obj]
+        name = aliases[0]
+        """ can pass in custom mod (and optionally name) to get documentation *specific* to this module;
+            if src_ref is None, it may be module (source_ref doesn't make sense), or we don't know what the source
+            was... a couple things in the logic cause this, for instance, the var was defined outside the
+            package, or as a nested function/class that would require accessing <locals> 
+        """
+        if src is None and not isinstance(vv, ModuleAPI):
+            doc = vv.get_documenter(obj, name)
+        else:
+            # this gets docs of source_ref, where variable was first created
+            doc = vv.get_documenter()
+        summary = doc.summary()
+        fqn = vv.fully_qualified_name
+        # source name, we'll use the last two objects (e.g. module+var, class+member)
+        fqn_parsed = parse_fqn(fqn)
+        source_name = fqn_parsed[-1]
+        short_source = ".".join(fqn_parsed[-2:])
+
+        var = {
+            "name": name,
+            "aliases": aliases[1:],
+            "order": vv.order(obj, name),
+            "source": vv.fully_qualified_name.replace("::","."),
+            "source_name": source_name,
+            "source_short": short_source,
+            "defined": not imported,
+            "summary": summary["summary"],
+            "signature": summary["signature"],
+            "value": vv,
+            "doc": doc
+        }
+        # categorize the variable
+        data[cat_cbk(var, extra)].append(var)
+
+    sorted_cats = []
+    for cat in sorted(list(data.keys())):
+        vars = data[cat]
+        # personally, I find alphabetical easier to navigate, so only use 2nd val of tuple
+        # to use src ordering, take that out
+        vars.sort(key=lambda v: v["order"][1])
+        sorted_cats.append({
+            "title": titles[cat],
+            "category": cat,
+            "vars": vars
         })
+    return sorted_cats
+
+def categorize_class(clazz, *args, **kwargs):
+    titles = [
+        "Inner Classes",
+        "Static Attributes",
+        "Class Attributes",
+        "Instance Attributes",
+        "Static Methods",
+        "Class Methods",
+        "Instance Methods"
+    ]
+    def get_cat(var, extra):
+        cat_type = ({
+            ClassMemberTypes.INNERCLASS: 0,
+            ClassMemberTypes.DATA: 1,
+            ClassMemberTypes.METHOD: 2
+        })[extra.type]
+        if cat_type:
+            cat_binding = ({
+                ClassMemberBindings.STATIC: 1,
+                ClassMemberBindings.CLASS: 2,
+                ClassMemberBindings.INSTANCE: 3
+            })[extra.binding]
+            return (cat_type-1)*3+cat_binding
+        return 0
+    return categorize_members(clazz, get_cat, titles, True, True)
+
+def categorize_module(mod, *args, **kwargs):
+    titles = [
+        "Data",
+        "Functions",
+        "Classes",
+        "Referenced Modules",
+        "Referenced Data",
+        "Referenced Functions",
+        "Referenced Classes"
+    ]
+    def get_cat(var, extra):
+        cat = ({
+            VariableTypes.MODULE: -1,
+            VariableTypes.DATA: 0,
+            VariableTypes.ROUTINE: 1,
+            VariableTypes.CLASS: 2
+        })[var["value"].type]
+        if not var["defined"]:
+            cat += 4
+        assert cat >= 0, "Module must be imported"
+        return cat
+    return categorize_members(mod, get_cat, titles, *args, **kwargs)
+
+def class_template(kiss, clazz, subdir:list, toc:list=None):
+    if toc is None: toc = []
+    sections = categorize_class(clazz)
+    autodoc = []
+
+    out = kiss.write_template(
+        "{}/{}.rst".format("/".join(subdir), clazz.name),
+        "object.rst",
+        {
+            "title": capitalize(clazz.name)+" Class",
+            "type": "class",
+            "name": clazz.fully_qualified_name.replace("::","."),
+            "sections": sections,
+            "toc": toc
+        }
+    )
     return out
 
-def function_template(kiss, fn):
-    """ Render template for function """
-    pass
 
-def class_template(kiss, clazz):
-    """ Render template for class """
-    pass
-
-def module_template(kiss, mod, title, toc=[]):
-    """ Render template for module """
-    # we assume variables (DATA) docs are short, so we can include in main module page
+def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False):
+    """ Render template for module. """
+    if toc is None: toc = []
+    sections = categorize_module(mod, include_imports)
     autodoc = []
-    # sorted by source for variables defined in module; imported vars sort by name
-    def_vars = var_summaries(mod, mod.vars, True)
-    for section in def_vars:
-        if section["type"] != VariableTypes.DATA:
-            continue
-        autodoc.append({
-            "title": section["title"],
-            "type": "autodata",
-            "list": [v["qualified_name"] for v in section["vars"]]
-        })
-
-    # for defined vars, we want to generate a separate folder with classes/functions
-    #for vv in mod.vars.get(VariableTypes.CLASS, []):
+    for s in sections:
+        cat = s["category"]
+        # we assume variables (DATA) docs are short, so we can include in main module page
+        if cat == 0:
+            lst = list(v["source"] for v in s["vars"] if v["defined"])
+            if lst:
+                autodoc.append({
+                    "title": s["title"],
+                    "type": "autodata",
+                    "list": lst
+                })
+        # classes defined in this module
+        elif cat == 2:
+            for var in s["vars"]:
+                if var["defined"]:
+                    toc.append(class_template(kiss, var["value"], [mod.name]))
 
     out = kiss.write_template(
         "{}.rst".format(mod.name),
-        "module.rst",
+        "object.rst",
         {
             "title": title,
-            "module": mod.name,
-            # summary information for variables
-            "vars": def_vars,
-            "aliased_vars": var_summaries(mod, mod.aliased_vars, False),
+            "type": "module",
+            "name": mod.fully_qualified_name,
+            "sections": sections,
             "autodoc": autodoc,
             # separate modules (for root package), classes, and functions docs
             "toc": toc
@@ -91,16 +182,19 @@ def module_template(kiss, mod, title, toc=[]):
 
 def mod_title(mod):
     """ return pretty title for module """
-    return mod.name.rsplit(".",1)[-1].title()
+    return capitalize(mod.name.rsplit(".",1)[-1])
 
 def package_template(kiss, pkg):
     """ Render template for package """
+    # first module is the "package" module
+    pkg_mod = pkg.package
+
     mod_paths = []
-    for mod in sorted(pkg.modules[1:], key=lambda m:m.name):
+    for mod in sorted(pkg.mods_tbl.values(), key=lambda m:m.name):
+        if mod is pkg_mod:
+            continue
         path = module_template(kiss, mod, mod_title(mod)+" Module")
         mod_paths.append(path)
 
-    # first module is the "package" module
-    pkg_mod = pkg.modules[0]
-    pkg_path = module_template(kiss, pkg_mod, mod_title(pkg_mod)+" Package", mod_paths)
+    pkg_path = module_template(kiss, pkg_mod, mod_title(pkg_mod)+" Package", mod_paths, True)
     return ".. include:: {}".format(pkg_path)

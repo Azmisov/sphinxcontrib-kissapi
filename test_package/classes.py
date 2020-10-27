@@ -1,3 +1,5 @@
+import types
+
 class Parent:
     attr_static_parent = None
     attr_static = 0
@@ -60,3 +62,32 @@ class Child(Parent):
     def meth_instance(self): pass
     @property
     def attr_property(self): pass
+
+def external_method():
+    """ a non-class function with no args """
+    pass
+def external_method_args(*args):
+    """ a class function with args """
+    pass
+
+# this tests some weirder cases
+child = Child()
+""" an instance of Child class """
+
+Child.meth_static_ext = external_method
+Child.meth_static_ext2 = staticmethod(external_method)
+Child.meth_static_ext3 = Parent.meth_static
+Child.meth_static_ext4 = Parent.__dict__["meth_static"]
+Child.meth_static_ext5 = types.MethodType(external_method_args, Parent)
+
+Child.meth_class_ext = classmethod(external_method_args)
+Child.meth_class_ext2 = types.MethodType(external_method_args, Child)
+Child.meth_class_ext3 = staticmethod(types.MethodType(external_method_args, Child))
+Child.meth_class_ext4 = staticmethod(classmethod(external_method_args))
+Child.meth_class_ext5 = classmethod(types.MethodType(external_method_args, child))
+
+Child.meth_instance_ext = external_method_args
+
+Child.meth_static_instance = types.MethodType(external_method_args, child)
+
+Child.attr_property_ext = property(external_method_args)
