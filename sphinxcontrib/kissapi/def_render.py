@@ -40,9 +40,15 @@ def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_
             # this gets docs of source_ref, where variable was first created
             doc = vv.get_documenter()
         summary = doc.summary()
-        fqn = vv.fully_qualified_name
+        if src is None:
+            fqn_parsed = parse_fqn(obj.fully_qualified_name)
+            fqn_parsed.append(name)
+            fqn = ".".join(fqn_parsed)
+        else:
+            fqn = vv.fully_qualified_name
+            fqn_parsed = parse_fqn(fqn)
+            fqn = fqn.replace("::",".")
         # source name, we'll use the last two objects (e.g. module+var, class+member)
-        fqn_parsed = parse_fqn(fqn)
         source_name = fqn_parsed[-1]
         short_source = ".".join(fqn_parsed[-2:])
 
@@ -50,10 +56,11 @@ def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_
             "name": name,
             "aliases": aliases[1:],
             "order": vv.order(obj, name),
-            "source": vv.fully_qualified_name.replace("::","."),
+            "source": fqn,
             "source_name": source_name,
             "source_short": short_source,
             "defined": not imported,
+            "external": vv.is_external() or src is None,
             "summary": summary["summary"],
             "signature": summary["signature"],
             "value": vv,
@@ -128,6 +135,23 @@ def class_template(kiss, clazz, subdir:list, toc:list=None):
     if toc is None: toc = []
     sections = categorize_class(clazz)
     autodoc = []
+    for s in sections:
+        cat = s["category"]
+        # inner class
+        if cat == 0:
+            for var in s["vars"]:
+                if var["defined"]:
+                    toc.append(class_template(kiss, var["value"], [*subdir, clazz.name]))
+        # attribute/methods
+        else:
+            mode = "autoattribute" if cat <= 3 else "automethod"
+            lst = list(v["source"] for v in s["vars"] if v["defined"] or v["external"])
+            if lst:
+                autodoc.append({
+                    "title": s["title"],
+                    "type": mode,
+                    "list": lst
+                })
 
     out = kiss.write_template(
         "{}/{}.rst".format("/".join(subdir), clazz.name),
@@ -137,6 +161,7 @@ def class_template(kiss, clazz, subdir:list, toc:list=None):
             "type": "class",
             "name": clazz.fully_qualified_name.replace("::","."),
             "sections": sections,
+            "autodoc": autodoc,
             "toc": toc
         }
     )
@@ -150,13 +175,14 @@ def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False)
     autodoc = []
     for s in sections:
         cat = s["category"]
-        # we assume variables (DATA) docs are short, so we can include in main module page
-        if cat == 0:
+        # we assume variables/function docs are short, so we can include in main module page
+        if cat <= 1:
+            mode = "autofunction" if cat else "autodata"
             lst = list(v["source"] for v in s["vars"] if v["defined"])
             if lst:
                 autodoc.append({
                     "title": s["title"],
-                    "type": "autodata",
+                    "type": mode,
                     "list": lst
                 })
         # classes defined in this module
