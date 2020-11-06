@@ -382,6 +382,11 @@ class RoutineAPI(VariableValueAPI):
         # source must be in a bound parent's refs, or the base function's refs
         base = self.base_function
         if not (val in base.refs or any(val in r.refs for r in base.refs if isinstance(r, RoutineAPI) and r.base_function is base)):
+            logger.critical("source_ref for bound method appears invalid")
+            print("value:", self._value)
+            print("base:", base._value)
+            print("source:", val)
+            print("base refs:", base.refs)
             raise RuntimeError("source_ref is not base function or bound method refs")
         self.base_function._source_ref = val
     def analyze_members(self):
@@ -963,6 +968,11 @@ class PackageAPI:
               (see :meth:`~VariableValueAPI.is_external`)
             - special: variable begins with double underscore (see :meth:`is_special`); this allows
               ``__all__`` and ``__version__`` within the ``__init__`` module, and also non-inherited class methods
+
+            :param pkg: PackageAPI for this variable
+            :param parent: the context in which we discovered this variable
+            :param value: the value of the variable
+            :param name: the name of the variable
         """
         class_mbr = isinstance(parent, ClassAPI)
         if is_private(name) or (not class_mbr and value.is_external()):
@@ -972,7 +982,7 @@ class PackageAPI:
         special_include = ["__all__","__version__"]
         if is_special(name):
             allowed_init = name in special_include and parent is pkg.package
-            allowed_override = class_mbr and isinstance(value, RoutineAPI)
+            allowed_override = isinstance(value, RoutineAPI) and (class_mbr or name == "__func__")
             return not (allowed_init or allowed_override)
     @staticmethod
     def module_import_analysis(value, modules:list):
