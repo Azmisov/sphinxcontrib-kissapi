@@ -83,7 +83,7 @@ def bootstrap(app):
 def setup(app):
     """ Called internally by Sphinx to register the extension """
     # We'll just have a single config dict for all configuration
-    app.add_config_value('kissapi_config', {}, '') # env/html other modes
+    app.add_config_value('kissapi_config', {}, 'env') # env/html other modes
     app.connect("builder-inited", bootstrap)
     app.add_directive("kissapi", KissAPIDirective)
 

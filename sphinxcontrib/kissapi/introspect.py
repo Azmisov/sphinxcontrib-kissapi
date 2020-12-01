@@ -1230,6 +1230,10 @@ class Documenter:
         Documenter.options.result = StringList()
         self.doc.add_content(None)
         summary = extract_summary(Documenter.options.result.data[:], Documenter.directive.state.document)
+        # summary is being a little too lenient and giving long summaries sometime
+        trim = summary.find(". ")
+        if trim != -1:
+            summary = summary[:trim+1]
         return {
             "signature": sig,
             "summary": summary
