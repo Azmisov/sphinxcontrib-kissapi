@@ -233,7 +233,7 @@ class VariableValueAPI:
             if len(val_str) > LEN_LIMIT:
                 val_str = val_str[:LEN_LIMIT-3]+"..."
             name = "anonymous<{}>".format(val_str)
-            logger.error("No source_ref set for %s", name)
+            #logger.error("No source_ref set for %s", name)
             return name
         v = self.refs[self.source_ref]
         return v[0]
@@ -379,14 +379,18 @@ class RoutineAPI(VariableValueAPI):
             if the actual ref (qualified name) is a bound method, and we're just pretending the true source
             is the underlying function
         """
-        # source must be in a bound parent's refs, or the base function's refs
+        # source must be in a bound parent's "selfs", or the base function's refs
         base = self.base_function
-        if not (val in base.refs or any(val in r.refs for r in base.refs if isinstance(r, RoutineAPI) and r.base_function is base)):
+        if not (
+            val in base.refs or
+            any(val in r.bound_selfs for r in base.refs if isinstance(r, RoutineAPI) and r.base_function is base)
+        ):
             logger.critical("source_ref for bound method appears invalid")
             print("value:", self._value)
             print("base:", base._value)
             print("source:", val)
             print("base refs:", base.refs)
+            print("base refs's refs:", list(r.bound_selfs for r in base.refs))
             raise RuntimeError("source_ref is not base function or bound method refs")
         self.base_function._source_ref = val
     def analyze_members(self):
@@ -1144,6 +1148,27 @@ class Documenter:
         self.fqn = fqn
         self.value = value
 
+        """ How autodoc gets documentation for objects:
+            Entry point is Documenter.add_content(additional_content, don't_include_docstring)
+            AttributeDocumenter: calls with no docstring if not a data descriptor
+                1. first check module analyzer, analyzer.find_attr_docs
+                2. if not in attr_docs, use self.get_doc
+                    getdoc + prepare_docstring methods
+                    getdoc specialization:
+                    - ClassDocumenter: it will get from __init__ or __new__ instead
+                    - SlotsDocumenter: if slots is a dict, treats key as the docstring
+                    Otherwise, getdoc is pretty simple actually, it grabs __doc__; if it is a partial method, it will
+                    get from func instead; if inherited option is allowed, it walks up the mro and finds __doc__
+                3. run self.process_doc on every line of docs, then append to StringList()
+                    doesn't do much, but emits event so extensions can preprocess docs
+
+                signature is the header:
+                self.format_signature()
+                self.add_directive_header(sig)
+
+            Although the doc stuff looks fine, the format_signature method is specialized for almost all classes, and
+            gets pretty complicated. So for now, I'll just use the autodoc classes
+        """
         # determine autodoc documenter class type
         if isinstance(value.value, property):
             t = PropertyDocumenter
@@ -1231,30 +1256,7 @@ class Documenter:
             name = "" if len(ns) < 2 else ns[1]
         return (self.doc.analyzer.tagorder.get(name, float("inf")), self.name)
 
-"""
-How autodoc gets documentation for objects
-Entry point is Documenter.add_content(additional_content, don't_include_docstring)
-AttributeDocumenter: calls with no docstring if not a data descriptor
-    1. first check module analyzer, analyzer.find_attr_docs
-    2. if not in attr_docs, use self.get_doc
-        getdoc + prepare_docstring methods
-        getdoc specialization:
-        - ClassDocumenter: it will get from __init__ or __new__ instead
-        - SlotsDocumenter: if slots is a dict, treats key as the docstring
-        Otherwise, getdoc is pretty simple actually, it grabs __doc__; if it is a partial method, it will
-        get from func instead; if inherited option is allowed, it walks up the mro and finds __doc__
-    3. run self.process_doc on every line of docs, then append to StringList()
-        doesn't do much, but emits event so extensions can preprocess docs
-        
-    signature is the header:
-    self.format_signature()
-    self.add_directive_header(sig)
-    
-Although the doc stuff looks fine, the format_signature method is specialized for almost all classes, and
-gets pretty complicated. So for now, I'll just use the autodoc classes
-"""
-
-pkg_memoize = {}
+_pkg_memoize = {}
 def analyze_package(pname:str, *args, **kwargs):
     """ Factory for PackageAPI. It memoizes previously analyzed packages
         and reuses the results if possible; otherwise, it will import the module
@@ -1263,9 +1265,9 @@ def analyze_package(pname:str, *args, **kwargs):
         .. Note::
             Memoizing does not consider differing PackageAPI ``options`` arguments
     """
-    if pname in pkg_memoize:
-        return pkg_memoize[pname]
+    if pname in _pkg_memoize:
+        return _pkg_memoize[pname]
     m = importlib.import_module(pname)
     api = PackageAPI(m, *args, **kwargs)
-    pkg_memoize[pname] = api
+    _pkg_memoize[pname] = api
     return api

@@ -22,7 +22,7 @@ def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_
             continue
         src = vv.source_ref
         if src is None and vv.type != VariableTypes.MODULE:
-            logger.warning("No source for variable:", vv.name)
+            logger.warning("No source for variable: %s", vv.name)
         imported = src is not obj
         if not include_imports and imported:
             continue

@@ -20,13 +20,15 @@
             I have made to go along with :meth:`~kissapi.render.package_template`
         jinja_env: jinja environment will be created from jinja_dir, but you can manually create one
             instead if you desire and set it to this config option
-        render: {
-            [pkgname]: a callback with signature (KissAPI, PackageAPI); it can use the KissAPI instance
-                to generate other reST files; return any text you wish to insert in-place of the
-                directive. By default, :meth:`~kissapi.render.package_template` will be used as the default,
-                which implements
+        output: {
+            [name]: {
+                package: the package to be introspected (see "introspect" config val to customize), and rendered
+                render: a callback with signature (RenderManager, PackageAPI); it can use the RenderManager instance
+                    to generate other reST files; return any text you wish to insert in-place of the directive. By
+                    default, :meth:`~def_render.package_template` will be used if not specified.
+            }
         }
-        # Options for customizing the introspection behavior
+        # Options for customizing the introspection behavior for packages to be rendered
         introspect: {
             [pkgname]: {
                 package_exclude: callback(pkg_name:str, module_name:str) -> bool; return True if the module
@@ -46,22 +48,18 @@
         }
     }
 
+    To inject rendered output into existing reST files, include the directive:
+
+    .. kissapi:: [output_name]
+
     TODO: Helper API methods:
         - undocumented, check if __doc__ is non-empty
-        - autodetect overriden methods, like __init__
+        - autodetect overridden methods, like __init__
         - detect :private: in doc string to exclude private stuff
         - "external" flag on VariableTypes.MODULE, if it isn't one of package modules
 """
-import os, shutil, jinja2
-from typing import Union
-from .introspect import logger, analyze_package, Documenter
-from .def_render import package_template
-
-# sphinx imports
-from docutils import nodes
-from docutils.statemachine import ViewList
-from sphinx.util.docutils import SphinxDirective
-from sphinx.util.nodes import nested_parse_with_titles
+from .introspect import logger
+from .manager import RenderManager, KissAPIDirective
 
 __version__ = "1.0.0"
 
@@ -70,164 +68,28 @@ def _nonempty_str(v):
         raise TypeError("need a non-empty string")
     return v
 
-class KissAPI(SphinxDirective):
-    # only argument is the package to analyze
-    required_arguments = 1
-    option_spec = {
-        # specifies the renderer to use; defaults to the package name
-        "render": _nonempty_str,
-        # specifies the introspection options to use; defaults to the package name
-        "introspect": _nonempty_str
-    }
-    mock_name = "kissapi_directive.rst"
-    """ mock_name is strictly for error messages of directive-inserted text """
+def bootstrap(app):
+    """ Main callback for KissAPI to execute. This is run during the Sphinx builder-inited event, which is the latest
+        event in which we are able to generate reST files. Here, we parse the kissapi_config value and run the
+        package introspection and rendering. These results can then be inserted using the kissapi directive.
+    """
+    try:
+        app.kissapi = RenderManager(app)
+    except Exception as e:
+        logger.critical("Exception encountered executing KissAPI", exc_info=e)
+        #traceback.print_exception(type(e), e, e.__traceback__)
+        raise e
 
-    __slots__ = ["source","root_dir","conf","out_dir","out_dir_rel"]
-
-    def run(self):
-        """ Sphinx directive entry point """
-        self.source = self.get_source_info()
-        """ source file and line number of the directive """
-        self.root_dir = os.path.abspath(os.path.normpath(self.env.srcdir))
-        """ root directory for docs """
-        self.conf = self.config.kissapi_config
-        """ kissapi configuration defined by user (with some modifications made by us) """
-        if not isinstance(self.conf, dict):
-            raise TypeError("kissapi_config must be a dict")
-
-        # check output directory
-        overwrite = self.conf.get("overwrite", True)
-        usr_out_dir = self.conf.get("out_dir", "kissapi_output")
-        # TODO: move this code to source_read sphinx handler, to avoid that deletion error?
-        self.out_dir = os.path.abspath(os.path.normpath(os.path.join(self.root_dir, usr_out_dir)))
-        try:
-            if self.out_dir == self.root_dir or os.path.commonpath([self.out_dir,self.root_dir]) != self.root_dir:
-                raise ValueError("commonpath check failed")
-            # handle overwrite check
-            if os.path.exists(self.out_dir):
-                if overwrite is True:
-                    shutil.rmtree(self.out_dir)
-                elif overwrite is False:
-                    logger.warning("KissAPI no-op, since overwrite set to False and out_dir found")
-                    return
-                elif overwrite == "partial":
-                    should_create = False
-                else:
-                    raise TypeError("invalid value for 'overwrite' option")
-            # so we don't actually create the directory until the user requests a file
-            # to be written from their renderer function; no need to create an empty directory
-        except ValueError as e:
-            raise ValueError("out_dir path must be within the docs root dir: {}".format(self.root_dir)) from e
-        self.out_dir_rel = os.path.relpath(self.out_dir, self.root_dir)
-
-        # load up jinja environment
-        if "jinja_env" not in self.conf:
-            default_jinja_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "def_templates"))
-            jinja_dir = self.conf.get("jinja_dir", default_jinja_dir)
-            if isinstance(jinja_dir, str):
-                if not os.path.isabs(jinja_dir):
-                    jinja_dir = os.path.join(self.root_dir, jinja_dir)
-                self.conf["jinja_env"] = jinja2.Environment(loader=jinja2.FileSystemLoader(jinja_dir))
-
-        pkg_name = self.arguments[0]
-        opts = self.options
-
-        # Get user template for rendering the API details
-        renderers = self.conf.get("render", {})
-        render_name = opts.get("render",pkg_name)
-        render_fn = renderers.get(render_name, None)
-        if not callable(render_fn):
-            raise KeyError("must provide callable for renderer '{}' in kissapi_config".format(render_name))
-
-        # run analysis + template rendering
-        # this allows introspect Documenter to work
-        Documenter.bind_directive(self)
-        introspect_opts = self.conf.get("introspect", {})
-        introspect_name = opts.get("introspect", pkg_name)
-        introspect = introspect_opts.get(introspect_name, {})
-        pkg = analyze_package(pkg_name, introspect)
-        out = render_fn(self, pkg)
-
-        # out is the text that should be inserted in the directive's place
-        # https://stackoverflow.com/questions/34350844/how-to-add-rst-format-in-nodes-for-directive
-        if out is None:
-            return []
-        if not isinstance(out, str):
-            raise TypeError("renderer must return a string if it wants to replace the directive")
-        rst = ViewList()
-        for i,line in enumerate(out.splitlines()):
-            rst.append(line, self.mock_name, i) # i as last arg?
-        node = nodes.section()
-        node.document = self.state.document
-        nested_parse_with_titles(self.state, rst, node)
-        return node.children
-
-    def render_template(self, name:str, vars:dict={}) -> str:
-        """ Render a template
-
-            :param str name: name of the template
-            :param dict vars: template variables
-        """
-        env = self.conf.get("jinja_env",None)
-        if not isinstance(env, jinja2.Environment):
-            raise ValueError("no jinja_dir (or env) option specified in kissapi_conf")
-        tpl = env.get_template(name)
-        return tpl.render(**vars)
-
-    def write_template(self, path: Union[list,tuple,str], name:str, vars:dict):
-        """ Render a template and then write the output to a file in out_dir
-
-            :param path: the path to write to; see write_file for details
-            :param str name: name of the template
-            :param dict vars: template variables
-            :returns: the relative output path of file
-        """
-        out = self.render_template(name, vars)
-        return self.write_file(path, out)
-
-    def write_file(self, path: Union[list,tuple,str], content:str):
-        """ Write a file to the out_dir
-
-            :param path: The path of the file to write. This should be relative to the out_dir. You can provide
-                this as a list/tuple, in which case it will join the path for you properly; specify the filename
-                as the last item in the list. You can use the staticmethod "unique_id" to generate an id to
-                make this filename unique.
-            :param content: The content to write to the file
-            :returns: the relative output path of file
-        """
-        if isinstance(path, str):
-            path = [path]
-        abs_path = os.path.abspath(os.path.normpath(os.path.join(self.out_dir, *path)))
-        abs_dir = os.path.dirname(abs_path)
-        try:
-            if os.path.commonpath([abs_dir, self.out_dir]) != self.out_dir:
-                raise ValueError("commonpath check failed")
-        except ValueError as e:
-            raise ValueError("file must be written inside out_dir") from e
-        # ensure parent directories all exist
-        os.makedirs(abs_dir, exist_ok=True)
-        with open(abs_path,"w",encoding='utf-8') as f:
-            f.write(content)
-        # reST wants unix style paths
-        return "/"+os.path.relpath(abs_path, self.root_dir).replace('\\', '/')
-
-    _next_id = 0
-    @staticmethod
-    def unique_id() -> str:
-        """ For writing files, it can be helpful to have a unique identifier to ensure filenames don't
-            conflict. Use this to generate a unique string id that can be pre/appended to a filename.
-        """
-        KissAPI._next_id += 1
-        return str(KissAPI._next_id)
-
-# Sphinx will import this file and call setup, if extension is listed in conf.py
 def setup(app):
+    """ Called internally by Sphinx to register the extension """
     # We'll just have a single config dict for all configuration
-    app.add_config_value('kissapi_config', {}, 'env')
-    app.add_directive("kissapi", KissAPI)
+    app.add_config_value('kissapi_config', {}, '') # env/html other modes
+    app.connect("builder-inited", bootstrap)
+    app.add_directive("kissapi", KissAPIDirective)
 
     return {
-        'version': '0.1',
+        'version': __version__,
+        # we do our file writes prior to parallel reads, so no problems
         'parallel_read_safe': True,
         'parallel_write_safe': True,
     }
