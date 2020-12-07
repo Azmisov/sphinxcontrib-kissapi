@@ -525,31 +525,32 @@ class ClassAPI(VariableValueAPI):
         """
         attrs = {}
         cls = self.value
+        """ slots are instance only data vals; it will throw an error if slot conflicts with class variable
+            so no need to worry about overriding other slot vars; slots create member descriptors on the class,
+            which is why they show up when you iterate through __dict__
+            other details: https://docs.python.org/3/reference/datamodel.html?highlight=slots#notes-on-using-slots
+        """
+        slots = set()
+        raw_slots = getattr(cls, "__slots__", None)
+        if raw_slots is not None:
+            if isinstance(raw_slots, str):
+                raw_slots = [raw_slots]
+            # could be dict, list, or tuple I think
+            for attr in iter(raw_slots):
+                # these two are special and just indicate the attrs should not be *removed* from class definition
+                if attr == "__dict__" or attr == "__weakref__":
+                    continue
+                slots.add(attr)
+        def source(f):
+            """ fully qualified name for function """
+            return "{}::{}".format(f.__module__, f.__qualname__)
+        # Note that when __slots__ is defined and doesn't contain __dict__, __dict__ will not be available on class instances
+        # However, we're introspecting on the *class* itself, not an instance; and __dict__ will always be available in this case
         for var,val in cls.__dict__.items():
             # this goes through descriptor interface, which binds the underlying value to the class/instance if needed
             bound_val = getattr(cls, var)
 
-            """ slots are instance only data vals; it will throw an error if slot conflicts with class variable
-                so no need to worry about overriding other slot vars; slots create member descriptors on the class,
-                which is why they show up when you iterate through __dict__
-                other details: https://docs.python.org/3/reference/datamodel.html?highlight=slots#notes-on-using-slots
-            """
-            slots = set()
-            raw_slots = getattr(cls, "__slots__", None)
-            if raw_slots is not None:
-                if isinstance(raw_slots, str):
-                    raw_slots = [raw_slots]
-                if len(slots):
-                    for attr in iter(slots):
-                        if attr == "__dict__" or attr == "__weakref__":
-                            continue
-                        slots.add(attr)
-
             # figure out what type of attribute this is
-            binding = None
-            def source(f):
-                """ fully qualified name for function """
-                return "{}::{}".format(f.__module__, f.__qualname__)
             # this gets functions, methods, and C extensions
             if inspect.isroutine(val):
                 # find the root function, and a list of bound parents
@@ -1230,7 +1231,7 @@ class Documenter:
         Documenter.options.result = StringList()
         self.doc.add_content(None)
         summary = extract_summary(Documenter.options.result.data[:], Documenter.directive.state.document)
-        # summary is being a little too lenient and giving long summaries sometime
+        # summary is being a little too lenient and giving long summaries sometimes
         trim = summary.find(". ")
         if trim != -1:
             summary = summary[:trim+1]
