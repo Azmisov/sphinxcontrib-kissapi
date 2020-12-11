@@ -1,7 +1,10 @@
 from setuptools import setup
 import sphinxcontrib.kissapi as kissapi
 
-reqs = open('requirements.txt', 'r').read().strip().splitlines()
+with open('requirements.txt', 'r') as f:
+    reqs = f.read().strip().splitlines()
+with open('README.rst', 'r', encoding="utf-8") as f:
+    long_description = f.read()
 
 setup(
     name='sphinxcontrib-kissapi',
@@ -11,6 +14,8 @@ setup(
     author='Isaac Nygaard',
     author_email='ozixtheorange@gmail.com',
     description="Simple and flexible python API documentation generation plugin for Sphinx",
+    long_description=long_description,
+    long_description_content_type="text/x-rst",
     keywords="sphinx automatic api generation documentation",
     zip_safe=False,
     classifiers=[

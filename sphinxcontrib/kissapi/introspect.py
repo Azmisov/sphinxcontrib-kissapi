@@ -933,7 +933,6 @@ class PackageAPI:
                 print("refs within this module:", refs)
                 raise e
 
-
     def add_external_module(self, mod_name:str):
         """ Mark all variables from the module given as "external" variables, outside the package
 
