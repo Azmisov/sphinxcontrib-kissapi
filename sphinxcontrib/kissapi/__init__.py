@@ -56,7 +56,7 @@
 from .introspect import logger
 from .manager import RenderManager, KissAPIDirective
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 def _nonempty_str(v):
     if not isinstance(v, str) or not str:

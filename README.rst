@@ -54,7 +54,7 @@ output : dict
     dict, with the following values:
 
     - *package* (str): The package to be introspected and rendered. See the ``introspect`` config value for customizing
-      introspection behavior. Provide a module here, not a string
+      introspection behavior. Provide the module name as a string.
     - *render* (callable): A callback with signature ``(mgr:RenderManager, pkg:PackageAPI)``. The second arg is the introspection
       results for the package, and you can use its API to examine the modules, classes, functions, variables, and
       information about them through there. The ``RenderManager`` instance has several methods to help you write reST
