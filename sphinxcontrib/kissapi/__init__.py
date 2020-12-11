@@ -52,7 +52,7 @@
 
     .. kissapi:: [output_name]
 
-    TODO: Helper API methods:
+    TODO, Helper API methods:
         - undocumented, check if __doc__ is non-empty
         - autodetect overridden methods, like __init__
         - detect :private: in doc string to exclude private stuff

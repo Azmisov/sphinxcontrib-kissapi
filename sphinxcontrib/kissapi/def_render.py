@@ -10,9 +10,14 @@ def capitalize(name):
 
 def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_external=False):
     """ Takes a module and organizes its members into sections
+
         :param obj: object whose members we want to categorize
-        :param cat_cbk: callback to categorize a member, cbk(vardata, member_info)
-        :param title_cbk: category -> category title callback, cbk(category)
+        :param cat_cbk: callback to categorize the member, ``cbk(var_info, member_info) -> int``
+        :param titles: titles for each category, where category is the index in the list
+        :param include_imports: whether we should include members where this obj is not the best source reference;
+            e.g. whether it was imported (or within modules, which reference of the variable is the true source)
+        :param include_external: whether we should include members that were found outside the package, and thus
+            were probably defined externally
     """
     # {category: [{... vardata ...}]}
     data = defaultdict(list)
@@ -22,12 +27,11 @@ def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_
             continue
         src = vv.source_ref
         if src is None and vv.type != VariableTypes.MODULE:
-            logger.warning("No source for variable: %s", vv.name)
+            logger.warning("No source for variable: %s", str(vv._value))
         imported = src is not obj
         if not include_imports and imported:
             continue
-        assert obj in vv.refs, "Object should be in variables refs to be in members!"
-        aliases = vv.refs[obj]
+        aliases = vv.aliases(obj)
         name = aliases[0]
         """ can pass in custom mod (and optionally name) to get documentation *specific* to this module;
             if src_ref is None, it may be module (source_ref doesn't make sense), or we don't know what the source

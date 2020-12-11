@@ -10,16 +10,16 @@
     1. Find target modules that are part of the package we want to analyze
     2. Build a table of all variables, as well as class attributes. Adding variables is broken into two steps, so
        that it can handle cyclical variable references:
-        - Add variable to the table if not already (PackageAPI.add_variable)
-        - Recursively analyze members or other nested variable information, then repeat (VariableValueAPI.analyze_members)
+
+       - Add variable to the table if not already (PackageAPI.add_variable)
+       - Recursively analyze members or other nested variable information, then repeat (VariableValueAPI.analyze_members)
     3. Determine the best source (e.g. qualified name) for each of the variables; all other references to the
        variable value are considered aliases of the best source.
 
     TODO:
-    - get_module for VVAPI
-    - fully_qualified_name + qualified_name for VVAPI needs to be recursive
-    - best_ref should not just get a module, but best parent
-    - how to handle nested classes/functions? e.g. <locals> is in qualname
+        - Use GC instead to get references, rather than having the ``analyze_members`` methods that has to be specialized
+          for each type. I think it could end up being a lot cleaner.
+        - how to handle nested classes/functions? e.g. <locals> is in qualname; currently I'm ignoring them
 """
 
 import inspect, sys, types, weakref, enum, importlib, re
@@ -211,7 +211,7 @@ class VariableValueAPI:
         return self._source_ref
     @source_ref.setter
     def source_ref(self, val):
-        if val is not None and val not in self.refs:
+        if not (val is None or val in self.refs):
             raise RuntimeError("source_ref must be inside refs")
         self._source_ref = val
     @property
@@ -223,7 +223,9 @@ class VariableValueAPI:
         return self._value
     @property
     def name(self) -> str:
-        """ Return primary variable name (from source_ref), or the module name if it is a module """
+        """ Return primary variable name (from source_ref), or the module name if it is a module. If no source_ref
+            is set and so we can't get the variable name, a placeholder ``"anonymous<...>"`` name is returned instead.
+        """
         if self.type == VariableTypes.MODULE:
             return self.value.__name__
         # TODO: use ``order`` to get first declared var name? (seems to be ordered correctly already though)
@@ -239,7 +241,9 @@ class VariableValueAPI:
         return v[0]
     @property
     def qualified_name(self) -> str:
-        """ get qualified name, not including module """
+        """ Get qualified name, not including module. This uses the chain of source_ref's to mimic a qualified name.
+            If a source_ref is missing, an empty string is returned.
+        """
         if self.source_ref is None:
             return ""
         n = self.name
@@ -248,19 +252,26 @@ class VariableValueAPI:
             return qn+"."+n
         return n
     @property
-    def fully_qualified_name(self) -> str:
-        mn = self.module
-        qn = self.qualified_name
-        if qn:
-            return "{}::{}".format(mn, qn)
-        return mn
-    @property
     def module(self) -> str:
+        """ Get module name for the variable. If this is not a module, it uses the chain of source_ref's to search
+            for the underlying module; if a source_ref is missing, an empty string is returned.
+        """
         if self.type == VariableTypes.MODULE:
             return self.name
         if self.source_ref is not None:
             return self.source_ref.module
         return ""
+    @property
+    def fully_qualified_name(self) -> str:
+        """ A combination of module and qualified name separated by "::". If it is a module, just the module half
+            is returned. If it has no ``__module__`` attribute, it uses the chain of source_ref's to mimic such,
+            giving an empty string if a source_ref is missing.
+        """
+        mn = self.module
+        qn = self.qualified_name
+        if qn:
+            return "{}::{}".format(mn, qn)
+        return mn
     def __repr__(self):
         return "<class {}:{}>".format(self.__class__.__qualname__, self.name)
 
@@ -281,17 +292,30 @@ class VariableValueAPI:
         """ whether this is an immutable type, so there would never be references of this same variable """
         return isinstance(self._value, Immutable)
 
+    def aliases(self, ref) -> list:
+        """ Given a reference to this variable, list the variable names it goes by
+
+            :param ref: variable reference object (e.g. class, module, etc)
+        """
+        if ref is None or ref not in self.refs:
+            raise ValueError("ref is not valid for this variable")
+        return self.refs[ref]
+
     def _ref_qualified_name(self, ref=None, name:str=None, allow_nosrc:bool=True):
+        # TODO: ugh, should probably cleanup this interface; maybe make qualified_name/module be methods instead of
+        #   properties and have them accept ref/name args
         if ref is None:
             ref = self.source_ref
             # this only works for get_documenter
-            if allow_nosrc and ref is None and self.type == VariableTypes.MODULE:
-                return (None, None, "", self.fully_qualified_name)
-        if ref not in self.refs:
-            raise ValueError("Ref is not in variables refs", self.refs, self._value)
+            if ref is None:
+                if allow_nosrc  and self.type == VariableTypes.MODULE:
+                    return (None, None, "", self.fully_qualified_name)
+                raise ValueError("the variable has no source_ref so can't get ref qualified name")
+        # will raise error if user-provided ref is bad
+        names = self.aliases(ref)
         if name is None:
-            name = self.refs[ref][0]
-        elif name not in self.refs[ref]:
+            name = names[0]
+        elif name not in names:
             raise ValueError("The ref/name combination not found in the variables refs")
         # qualified name for this reference
         pname = ref.qualified_name
@@ -307,8 +331,10 @@ class VariableValueAPI:
             works using the sphinx ModuleAnalyzer attached to ModuleAPI, so we first need a reliable ``source_ref``
             and qualified name for the ref
 
-            :param ref: the parent reference where we're trying to get tag order
-            :param name: the variable name of the reference in ``ref``
+            :param ref: the parent reference where we're trying to get tag order; if ``None``, it uses the ``source_ref``
+            :param name: the variable name of the reference in ``ref``; if ``None``, it uses the first variable name
+                of ``ref``
+            :returns: ``tuple (int, str)``, which can be used for ordering first by tag order then var name
         """
         ref, name, qn, fqn = self._ref_qualified_name(ref, name, False)
         modapi = self.package.fqn_tbl.get(fqn,None)
@@ -319,22 +345,14 @@ class VariableValueAPI:
 
     def get_documenter(self, ref=None, name:str=None):
         """ Get a sphinx documenter object for this value.
-            If ref/name are None, then it uses the first varname of ``source_ref``
+
+            :param ref: the parent reference where we're trying to get documentaiton for; if ``None``, it uses the ``source_ref``
+            :param name: the variable name of the reference in ``ref``; if ``None``, it uses the first variable name
+                of ``ref``
+            :returns: Documenter object
         """
         ref, name, qn, fqn = self._ref_qualified_name(ref, name)
         return Documenter(fqn, self, ref, name)
-
-    """   
-    def documenter(self) -> "Documenter":
-        "" Get a Documenter object for this variable ""
-        if self._doc is None:
-            if self.best_ref is None:
-                self._doc = Documenter(self.name)
-            # TODO: return a documenter for all references, rather than just the best_ref one?
-            else:
-                self._doc = Documenter(self.best_ref.name, self.name)
-        return self._doc
-    """
 
     def analyze_members(self):
         """ Analyze sub-members of this variable. This should be implemented by subclasses """
@@ -378,21 +396,40 @@ class RoutineAPI(VariableValueAPI):
         """ the source_ref may not actually be in refs yet for root functions of RoutineAPI; this happens
             if the actual ref (qualified name) is a bound method, and we're just pretending the true source
             is the underlying function
+
+            When we set source_ref, we're indicating the source for the *base routine*, not the bound wrappers;
+            any place that base routine is referenced/bound, documentation will point back to the original source definition
+            of the routine; what is a valid source_ref?
+
+            1) direct reference to the base routine (e.g. module, wrappers- which can include class methods and partials)
+            2) direct references to the bound wrapper (RoutineAPI with this as its base function) (e.g. class)
+
+            Inside PackageAPI, we use __moodule__+__qualname__ to set the source_ref directly. However, may not meet
+            the 2 validity criteria mentioned. This can happen if the __qualname__ reference was ignored (e.g.
+            PackageAPI.default_var_exclude). In any case, we'll throw an exception and anything downstream can catch
+            it if it wants
         """
-        # source must be in a bound parent's "selfs", or the base function's refs
         base = self.base_function
+        assert not base.bound_selfs, "base_function should not be bound"
         if not (
             val in base.refs or
-            any(val in r.bound_selfs for r in base.refs if isinstance(r, RoutineAPI) and r.base_function is base)
+            any(val in r.refs for r in base.refs if (isinstance(r, RoutineAPI) and r.base_function is base))
         ):
-            logger.critical("source_ref for bound method appears invalid")
-            print("value:", self._value)
-            print("base:", base._value)
-            print("source:", val)
-            print("base refs:", base.refs)
-            print("base refs's refs:", list(r.bound_selfs for r in base.refs))
-            raise RuntimeError("source_ref is not base function or bound method refs")
-        self.base_function._source_ref = val
+            raise RuntimeError("given source_ref does not reference, or is not bound to the routine (probably because the var was excluded)")
+        base._source_ref = val
+
+    def aliases(self, ref):
+        """ Overridden method to account for routine's base_function """
+        base = self.base_function
+        if ref in base.refs:
+            return base.refs[ref]
+        # check binding wrappers
+        for r in base.refs:
+            if isinstance(r, RoutineAPI) and r.base_function is base:
+                if ref in r.refs:
+                    return r.refs[ref]
+        raise RuntimeError("given source_ref does not reference, or is not bound to the routine (probably because the var was excluded)")
+
     def analyze_members(self):
         """ Analyze root function of the routine. This extracts out any class/object bindings so that
             we can examine the base function that eventually gets called
@@ -813,10 +850,15 @@ class PackageAPI:
                 # accessible way, or is bound to a RoutineAPI which is accessible; so defer to source resolution to
                 # figure out what the best ref is for these
                 if "<locals>" not in name:
-                    if name not in self.fqn_tbl:
-                        raise RuntimeError("Variable has importable qualname {}, but {} not found".format(vv.fully_qualified_name, name))
-                    else:
-                        vv.source_ref = self.fqn_tbl[name]
+                    try:
+                        if name not in self.fqn_tbl:
+                            raise RuntimeError("Variable has importable qualname {}, but {} not found".format(vv.fully_qualified_name, name))
+                        else:
+                            vv.source_ref = self.fqn_tbl[name]
+                    # will silently ignore; this error is caused if the __qualname__ referenced was excluded
+                    # have to use a different reference instead, which will be resolved later
+                    except Exception as e:
+                        logger.debug("can't use qualname '%s' to set source_ref", name, exc_info=e)
 
                 # update "maybe imports" for anything that referenced this variable
                 vv_mod = self.mods_tbl[module]
@@ -873,14 +915,24 @@ class PackageAPI:
             # if it is referenced in the actual module, then we'll assume it was defined there, and then
             # referenced inside the class, rather than the other way around
             refs = mod_refs[best_mod]
-            if refs[0] is best_mod:
-                vv.source_ref = best_mod
-            elif len(refs) == 1:
-                vv.source_ref = refs[0]
-            else:
-                # class which is referenced the most times
-                refs.sort(key=lambda m: (-sum(len(l) for l in m.refs.values()), m.qualified_name))
-                vv.source_ref = refs[0]
+            try:
+                if refs[0] is best_mod:
+                    vv.source_ref = best_mod
+                elif len(refs) == 1:
+                    vv.source_ref = refs[0]
+                else:
+                    # class which is referenced the most times
+                    refs.sort(key=lambda m: (-sum(len(l) for l in m.refs.values()), m.qualified_name))
+                    vv.source_ref = refs[0]
+            # shouldn't happen, but may be some cases I haven't thought of
+            except Exception as e:
+                print("Failed to set source_ref after analyzing import graph and classes")
+                print("value:", vv)
+                print("candidate modules:", mod_lst)
+                print("best module:", best_mod.name)
+                print("refs within this module:", refs)
+                raise e
+
 
     def add_external_module(self, mod_name:str):
         """ Mark all variables from the module given as "external" variables, outside the package
@@ -1194,14 +1246,13 @@ class Documenter:
             t = ModuleDocumenter
         else:
             t = DataDocumenter
+        # TODO: specialization for enum and exception
 
         # The rest here was copied/adapted from autosummary source code
         self.doc = t(Documenter.options, fqn)
         if not self.doc.parse_name():
             raise RuntimeError("documenter parse_name failed: {}".format(fqn))
         if not self.doc.import_object():
-            print(self.doc.module, self.doc.name, t)
-            print(self.ref, self.name, self.fqn, self.value, self.value.source_ref)
             raise RuntimeError("documenter import_object failed: {}".format(fqn))
 
         mod_name = fqn.split("::", 1)[0]
