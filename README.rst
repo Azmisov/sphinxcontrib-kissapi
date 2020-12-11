@@ -63,7 +63,7 @@ output : dict
       The callback can return a string or list of reST nodes that should be stored as ``out_name`` inside the ``RenderManager``
       if you wish. These can later be injected into your pre-existing reST documents. However, this is not required.
 
-      How you render the package is entirely up to you; so you  A default renderer that I have written for one of my projects
+      How you render the package is entirely up to you. A default renderer that I have written for one of my projects
       is available at ``sphinxcontrib.kissapi.def_render.pkg_template``, and I'm pleased with the docs it generates. Feel
       free to use or modify it for your own project.
 introspect : dict
@@ -71,7 +71,7 @@ introspect : dict
     name to config options: ``{package_name: introspect_config, ...}``. The config options are specified as a dict with
     the following optional values:
 
-    - *package_exclude*: A callback with signature ``(pkg_name:str, module_name:str) -> bool``. It should return
+    - *package_exclude*: A callback with signature ``(pkg_name:str, module_name:str) -> bool``. It should
       return ``True`` if the module (e.g. from ``sys.modules``) should be excluded from the package. By default if
       not provided, ``PackageAPI.default_package_exclude`` is used; this default method excludes modules not prefixed by
       ``"[pkg_name]."``, or contain a private module somewhere in the path (e.g. prefixed by underscore, such as
@@ -87,12 +87,12 @@ introspect : dict
         class Foo:
             bar = baz
 
-      The first reference is in the gloals of the module itself with the name ``baz``. The second reference is inside
+      The first reference is in the globals of the module itself with the name ``baz``. The second reference is inside
       class ``Foo`` with name ``bar``. The "parent" in this example is either the module or class; the "value" is ``[1,2,3]``;
       the "name" is either ``baz`` or ``bar`` depending on the parent.
 
       What this option allows you to do is specify what variable references should be analyzed and which should be skipped.
-      By default if not provided, ``PackageAPI.default_var_exclude``; this default method excludes private (prefixed by
+      By default if not provided, ``PackageAPI.default_var_exclude`` is used; this default method excludes private (prefixed by
       a single underscore) and external (detected in non-package modules) variables.
 
 Altogether, here is an example of the code you might put in ``conf.py``:
@@ -112,8 +112,9 @@ Altogether, here is an example of the code you might put in ``conf.py``:
         }
     }
 
-If the renderer output values, they can be referenced in your existing reST documentation using the ``kissapi`` directive.
-For the above ``conf.py`` example, we could inject ``"my_rendered_output"`` by adding this directive somewhere:
+If the render callback were to output values, they can be referenced in your existing reST documentation using the
+``kissapi`` directive. For the above ``conf.py`` example, we could inject ``"my_rendered_output"`` by adding this
+directive somewhere:
 
 .. code-block:: rest
 
@@ -121,5 +122,5 @@ For the above ``conf.py`` example, we could inject ``"my_rendered_output"`` by a
 
 API
 ===
-I still need to setup a readthedocs site and write a more official docs site. Until then, reference the docstrings
+I still need to setup a ReadTheDocs site and write a more in-depth usage guide. Until then, reference the docstrings
 for the classes, in particular from ``introspect.py`` and ``manager.py``.
