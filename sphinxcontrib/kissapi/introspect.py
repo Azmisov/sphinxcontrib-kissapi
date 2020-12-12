@@ -815,8 +815,10 @@ class PackageAPI:
                     continue
                 mods_seen.add(k)
                 seen_new = True
-                if package_exclude(self.name, k):
-                    self.add_external_module(k)
+                should_exclude = package_exclude(self.name, k)
+                if should_exclude:
+                    if should_exclude is True:
+                        self.add_external_module(k)
                     continue
                 self.add_variable(sys.modules[k], True)
             if not seen_new:
@@ -1011,10 +1013,10 @@ class PackageAPI:
             return True
         # ignore private modules
         if any(x.startswith("_") for x in module_name[len(pkg_name)+1:].split(".")):
-            return True
+            return "private"
         # ignore executable packages
         if not isinstance(sys.modules[module_name], types.ModuleType):
-            return True
+            return "executable"
     @staticmethod
     def default_var_exclude(pkg, parent, value, name):
         """ Default variable exclusion callback. This ignores variables that are:

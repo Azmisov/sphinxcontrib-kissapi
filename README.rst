@@ -72,10 +72,13 @@ introspect : dict
     the following optional values:
 
     - *package_exclude*: A callback with signature ``(pkg_name:str, module_name:str) -> bool``. It should
-      return ``True`` if the module (e.g. from ``sys.modules``) should be excluded from the package. By default if
-      not provided, ``PackageAPI.default_package_exclude`` is used; this default method excludes modules not prefixed by
-      ``"[pkg_name]."``, or contain a private module somewhere in the path (e.g. prefixed by underscore, such as
-      ``mypackage._private.submodule``). Note that only non-exluded modules get introspected by KissAPI.
+      return ``True`` if the module (e.g. from ``sys.modules``) should be excluded from the package and marked as
+      an "external" module. You can also return any other truthy value to exclude the module, but not mark it as external.
+      Variables that are referenced in both your package and an external module will show up True when ``is_external`` is called.
+
+      If this callback is not provided, ``PackageAPI.default_package_exclude`` is used; this default method excludes modules
+      not prefixed by ``"[pkg_name]."``, or contain a private module somewhere in the path (e.g. prefixed by underscore,
+      such as ``mypackage._private.submodule``). Note that only non-exluded modules get introspected by KissAPI.
 
     - *var_exclude*: A callback with signature ``(pkg:PackageAPI, parent:VariableValueAPI, value:VariableValueAPI, name:str) -> bool``.
       KissAPI uses the notion of a variable reference, which is parent context and variable reference name. For example

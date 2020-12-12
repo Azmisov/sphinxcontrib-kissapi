@@ -47,7 +47,7 @@
 
     .. kissapi:: [output_name]
 
-    TODO, Helper API methods:
+    TODO: Helper API methods:
         - undocumented, check if __doc__ is non-empty
         - autodetect overridden methods, like __init__
         - detect :private: in doc string to exclude private stuff
@@ -56,7 +56,7 @@
 from .introspect import logger
 from .manager import RenderManager, KissAPIDirective
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 def _nonempty_str(v):
     if not isinstance(v, str) or not str:

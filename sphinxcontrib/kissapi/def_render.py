@@ -47,10 +47,15 @@ def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_
         if src is None:
             fqn_parsed = parse_fqn(obj.fully_qualified_name)
             fqn_parsed.append(name)
+            if len(fqn_parsed) > 1:
+                ext_fqn = fqn_parsed[0]+"::"+(".".join(fqn_parsed[1:]))
+            else:
+                ext_fqn = fqn_parsed[0]
             fqn = ".".join(fqn_parsed)
         else:
             fqn = vv.fully_qualified_name
             fqn_parsed = parse_fqn(fqn)
+            ext_fqn = fqn
             fqn = fqn.replace("::",".")
         # source name, we'll use the last two objects (e.g. module+var, class+member)
         source_name = fqn_parsed[-1]
@@ -60,9 +65,10 @@ def categorize_members(obj, cat_cbk, titles:list, include_imports=True, include_
             "name": name,
             "aliases": aliases[1:],
             "order": vv.order(obj, name),
-            "source": fqn,
-            "source_name": source_name,
-            "source_short": short_source,
+            "source": fqn, # module.qualname
+            "source_ext": ext_fqn, # module::qualname, format needed by autodoc
+            "source_name": source_name, # final path value in source
+            "source_short": short_source, # final two path values in source
             "defined": not imported,
             "external": vv.is_external() or src is None,
             "summary": summary["summary"],
@@ -149,7 +155,7 @@ def class_template(kiss, clazz, subdir:list, toc:list=None):
         # attribute/methods
         else:
             mode = "autoattribute" if cat <= 3 else "automethod"
-            lst = list(v["source"] for v in s["vars"] if v["defined"] or v["external"])
+            lst = list(v["source_ext"] for v in s["vars"] if v["defined"] or v["external"])
             if lst:
                 autodoc.append({
                     "title": s["title"],
@@ -157,13 +163,15 @@ def class_template(kiss, clazz, subdir:list, toc:list=None):
                     "list": lst
                 })
 
+    #print("writing class template: ", clazz.fully_qualified_name)
     out = kiss.write_template(
         "{}/{}.rst".format("/".join(subdir), clazz.name),
         "object.rst",
         {
             "title": capitalize(clazz.name)+" Class",
             "type": "class",
-            "name": clazz.fully_qualified_name.replace("::","."),
+            "name": clazz.fully_qualified_name,
+            #"module": module,
             "sections": sections,
             "autodoc": autodoc,
             "toc": toc
@@ -171,8 +179,7 @@ def class_template(kiss, clazz, subdir:list, toc:list=None):
     )
     return out
 
-
-def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False):
+def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False, write_file:bool=True):
     """ Render template for module. """
     if toc is None: toc = []
     sections = categorize_module(mod, include_imports)
@@ -182,7 +189,7 @@ def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False)
         # we assume variables/function docs are short, so we can include in main module page
         if cat <= 1:
             mode = "autofunction" if cat else "autodata"
-            lst = list(v["source"] for v in s["vars"] if v["defined"])
+            lst = list(v["source_ext"] for v in s["vars"] if v["defined"])
             if lst:
                 autodoc.append({
                     "title": s["title"],
@@ -195,8 +202,7 @@ def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False)
                 if var["defined"]:
                     toc.append(class_template(kiss, var["value"], [mod.name]))
 
-    out = kiss.write_template(
-        "{}.rst".format(mod.name),
+    out = kiss.render_template(
         "object.rst",
         {
             "title": title,
@@ -208,6 +214,10 @@ def module_template(kiss, mod, title, toc:list=None, include_imports:bool=False)
             "toc": toc
         }
     )
+    # returns output filename
+    if write_file:
+        return kiss.write_file("{}.rst".format(mod.name), out)
+    # returns rendered contents
     return out
 
 def mod_title(mod):
@@ -226,5 +236,5 @@ def package_template(kiss, pkg):
         path = module_template(kiss, mod, mod_title(mod)+" Module")
         mod_paths.append(path)
 
-    pkg_path = module_template(kiss, pkg_mod, mod_title(pkg_mod)+" Package", mod_paths, True)
-    return ".. include:: {}".format(pkg_path)
+    api_entrypoint = module_template(kiss, pkg_mod, mod_title(pkg_mod)+" Package", mod_paths, True, write_file=False)
+    return api_entrypoint
