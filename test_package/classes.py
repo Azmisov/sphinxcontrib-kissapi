@@ -91,3 +91,8 @@ Child.meth_instance_ext = external_method_args
 Child.meth_static_instance = types.MethodType(external_method_args, child)
 
 Child.attr_property_ext = property(external_method_args)
+
+# instance method attached to a single instance;
+# these won't get documented, since they won't belong to the Child type
+child.meth_instance_independent = types.MethodType(external_method_args, child)
+child.meth_instance_independent2 = child.__get__(external_method_args)
