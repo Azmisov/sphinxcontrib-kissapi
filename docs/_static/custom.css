@@ -1,0 +1,130 @@
+/* Put any custom styles in this file */
+
+body,html{
+    /* needed to make nav side sticky work */
+    overflow-x:unset;
+}
+body{
+    background:url("seigaiha_edit.png") fixed repeat white !important;
+    display:flex;
+    align-items: stretch;
+    flex-direction:column;
+}
+
+/* make logo full size in nav box */
+.wy-side-nav-search{
+    background-color:#dee1e6;
+    padding:0;
+}
+.wy-side-nav-search>a{
+    margin:0;
+    padding:0;
+}
+.wy-side-nav-search>a>img{
+    padding:0;
+}
+.wy-side-nav-search>div[role="search"]{
+    padding:.809em;
+}
+
+.wy-grid-for-nav{
+    /* container for nav + content */
+    display:flex;
+    max-width:1300px;
+    margin-left:auto;
+    margin-right:auto;
+    position:inherit;
+    align-items: stretch;
+    border-left:2px solid #b7b7b7;
+    border-right:2px solid #b7b7b7;
+    box-shadow:0 0 20px rgba(0,0,0,.5);
+    flex-direction:row;
+    flex-grow: 1;
+    background-color:#343131;
+}
+.wy-nav-side{
+    /* sidebar nav */
+    position:inherit;
+    min-width:300px;
+    z-index:10;
+    position:sticky;
+    top:0px;
+    max-height:100vh;
+    padding-bottom:0;
+}
+.wy-nav-content-wrap{
+    /* wrapper for main content */
+    margin-left:0px;
+    z-index:20;
+    flex-grow: 1;
+}
+.wy-nav-content{
+    /* actual main content */
+    max-width:inherit;
+}
+
+@media screen and (max-width:768px) {
+    .wy-nav-top{
+        color:black;
+        background-color:#dee1e6;
+        border-bottom:4px solid black;
+    }
+    .wy-nav-top > a{
+        color:black;
+        font-weight:bold;
+        text-transform:uppercase;
+    }
+    .wy-nav-side:not(.shift){
+        display:none;
+    }
+}
+
+/* Actual content styling */
+.rubric{
+    border-left:3px solid #c48835;
+    background-color:#fbe4bc9e;
+    padding:4px 9px;
+    color: #421e06;
+    /* font-style: italic; */
+    border-radius: 3px;
+    margin-left: -11px;
+}
+.wy-table-responsive table td:not(:first-child){
+    /* makes tables wrap */
+    white-space: normal !important;
+}
+dt:not([class]){
+    border-width:0 0 0 3px;
+    border-radius:3px;
+    padding:6px;
+    padding-right:30px;
+    color:#3c3c3c !important;
+    line-height:normal;
+    display:table;
+    font-size:95%
+}
+
+/* kissapi summary table */
+p.kissapi-wrap{
+    white-space:normal !important;
+}
+table.kiss-summary{
+    width:100%;
+}
+table.kiss-summary td:first-child{
+    white-space:nowrap !important;
+}
+table.kiss-summary td:not(:first-child){
+    white-space:normal !important;
+}
+table.kiss-summary td:first-child>p:first-child>em{
+    color: #a69473;
+    font-size:.85rem;
+}
+table.kiss-summary td:first-child>p:not(:first-child){
+    margin-left:16px;
+    margin-top:6px;
+}
+table.kiss-summary td:first-child>p:not(:first-child)>strong{
+    font-size:.78rem !important;
+}

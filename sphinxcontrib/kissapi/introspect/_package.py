@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys, types, inspect
 from typing import Union
 from collections import defaultdict
@@ -64,7 +65,7 @@ class PackageAPI:
 		""" Lookup table for fully qualified names, mapping to VariableValueAPI objects. This does not contain
 			all variables, just those that encode raw qualified name data, like classes, functions, and modules. 
 		"""
-		self.package = self.add_variable(pkg)
+		self.package = self.add_variable(pkg, module=True, package=True)
 		""" The module entry-point for the package. Also accessible as first element of `modules` """
 
 		noop_cbk = lambda *args: False
@@ -87,16 +88,16 @@ class PackageAPI:
 				seen_new = True
 				should_exclude = package_exclude(self.name, k)
 				if should_exclude is True:
-					logger.verbose("excluding module's variables: %s", k)
+					logger.verbose("Excluding module's variables: %s", k)
 					self.add_external_module(k)
 					continue
 				# internal; may or may not be included in package though
 				should_include = not should_exclude
-				self.add_variable(sys.modules[k], package=should_include, analyze=should_include)
+				self.add_variable(sys.modules[k], module=True, package=should_include, analyze=should_include)
 			if not seen_new:
 				break
-		logger.verbose("%d modules internal modules", len(self.int_tbl))
-		logger.verbose("%d modules belong to this package", len(self.mods_tbl))
+		logger.verbose("%d internal modules", len(self.int_tbl))
+		logger.verbose("%d accessible modules belong to package", len(self.mods_tbl))
 		logger.verbose("%d exported variables defined in external modules", len(self.ext_tbl))
 
 		# analyse all variables; repeat until no new sub-variables have been discovered
@@ -119,103 +120,112 @@ class PackageAPI:
 		def dont_resolve(vv):
 			# external, source_ref already set elsewhere (probably by class itself), no refs, or ModuleAPI
 			return vv.is_external() or vv.source_ref is not None or not vv.refs or isinstance(vv, ModuleAPI)
-		# we've indexed all variables and imports; now we guess source definition qualname of variables
-		# Routine/ClassAPI are functions/classes defined within the package, so have qualname that can be used to set the best reference
-		for vv in self.var_tbl.values():
-			if dont_resolve(vv):
-				continue
-			if isinstance(vv, (RoutineAPI, ClassAPI)):
-				# qualname is guaranteed to be within package's allowed modules, since otherwise we would have made it DATA type
-				name = module = vv.module
-				attr_split = vv.qualified_name.rsplit(".",1)
-				if len(attr_split) > 1:
-					name += "::"+attr_split[0]
-				# type is nested inside function, so not importable directly; it must have been referenced in some
-				# accessible way, or is bound to a RoutineAPI which is accessible; so defer to source resolution to
-				# figure out what the best ref is for these
-				if "<locals>" not in name:
-					try:
-						if name not in self.fqn_tbl:
-							raise RuntimeError("Variable has importable qualname {}, but {} not found".format(vv.fully_qualified_name, name))
-						else:
-							vv.source_ref = self.fqn_tbl[name]
-					# will silently ignore; this error is caused if the __qualname__ referenced was excluded
-					# have to use a different reference instead, which will be resolved later
-					except Exception as e:
-						logger.verbose("Can't use qualname '%s' to set source_ref", name, exc_info=e)
+		
+		with logger.indent():
+			# we've indexed all variables and imports; now we guess source definition qualname of variables
+			# Routine/ClassAPI are functions/classes defined within the package, so have qualname that can be used to set the best reference
+			for vv in self.var_tbl.values():
+				if dont_resolve(vv):
+					continue
+				if isinstance(vv, (RoutineAPI, ClassAPI)):
+					# qualname is guaranteed to be within package's internal modules, since otherwise we would have made it DATA type
+					name = module = vv.module
+					# if source module was excluded from package (e.g. a private module), we'll need
+					# further analysis to pick a "pretend" source module
+					if module not in self.mods_tbl:
+						continue
+					attr_split = vv.qualified_name.rsplit(".",1)
+					if len(attr_split) > 1:
+						name += "::"+attr_split[0]
+					# if type is nested inside function, not importable directly; it must have been referenced in some
+					# accessible way, or is bound to a RoutineAPI which is accessible; so defer to source resolution to
+					# figure out what the best ref is for these
+					if "<locals>" not in name:
+						try:
+							if name not in self.fqn_tbl:
+								raise RuntimeError("Variable has importable qualname {}, but {} not found".format(vv.fully_qualified_name, name))
+							else:
+								logger.verbose(f"Set source reference: {name} -> {vv}")
+								vv.source_ref = self.fqn_tbl[name]
+						# will silently ignore; this error is caused if the __qualname__ referenced was excluded
+						# have to use a different reference instead, which will be resolved later
+						except Exception as e:
+							logger.verbose("Can't use qualname '%s' to set source_ref", name, exc_info=e)
 
-				# update "maybe imports" for anything that referenced this variable
-				vv_mod = self.mods_tbl[module]
-				for r in vv.refs.keys():
-					m = r.module
-					if m and m != module and m in self.mods_tbl:
-						self.mods_tbl[m].maybe_imports.add(vv_mod)
+					# update "maybe imports" for anything that referenced this variable
+					if module not in self.mods_tbl:
+						raise RuntimeError("missing module")
+					vv_mod = self.mods_tbl[module]
+					for r in vv.refs.keys():
+						m = r.module
+						if m and m != module and m in self.mods_tbl:
+							self.mods_tbl[m].maybe_imports.add(vv_mod)
 
-		for vv in self.var_tbl.values():
-			""" first, determine what the best source module is for a variable (where variable was defined);
-				Unfortunately, it is not possible to really tell *where* a variable came from (see https://stackoverflow.com/questions/64257527/).
-				A module's members may have been imported from another module, so you can't say exactly what module a variable
-				belongs to. Or if a variable is the same across multiple classes, which class was it defined in initially?
-				So you have to make some assumptions.
-				
-				- modules are their own source, so doesn't make sense to set it for module types
-				- external variables don't need best source, since it is defined externally; user can choose to
-				  document each reference individually, or just mark it as external
-				All that is left is DATA types, which we do an analysis of the graph of module imports
-				
-				DATA variable defined in multiple modules; have to do some more in depth analysis
-				to determine which module is the "true" source of the variable.
-				
-				Some of cases needed to resolve:
-				- variable set in multiple classes, modules, or both
-				- data variables in external modules, e.g. val = ext_dict["attr"]; no way to detect that as from
-				  an external module
-				- routines/classes defined in <locals>
-				
-				ref can be module, class, or routine; for now we'll ignore routine's, since those are either
-				1) a bound self 2) external function 3) <locals> function. If user needs source_ref, they
-				can pick one manually
-			"""
-			if dont_resolve(vv):
-				continue
-			crefs = list(r for r in vv.refs if isinstance(r, ClassAPI))
-			mrefs = list(r for r in vv.refs if isinstance(r, ModuleAPI))
-			# convert crefs to modules temporarily
-			mod_refs = defaultdict(list)
-			for m in mrefs:
-				mod_refs[m].append(m)
-			for c in crefs:
-				if c.module in self.mods_tbl:
-					mod_refs[self.mods_tbl[c.module]].append(c)
-			mod_lst = list(mod_refs.keys())
-			# can't specify source... probably bound to a routine or something, but not referenced elsewhere
-			if not mod_lst:
-				continue
-			if len(mod_lst) > 1:
-				best_mod = self.module_import_analysis(vv.value, mod_lst)
-			else:
-				best_mod = mod_lst[0]
-			# we have our guess for module that it came from, now pick a class
-			# if it is referenced in the actual module, then we'll assume it was defined there, and then
-			# referenced inside the class, rather than the other way around
-			refs = mod_refs[best_mod]
-			try:
-				if refs[0] is best_mod:
-					vv.source_ref = best_mod
-				elif len(refs) == 1:
-					vv.source_ref = refs[0]
+			for vv in self.var_tbl.values():
+				""" Determine what the best source module is for a variable (where variable was defined);
+					Unfortunately, it is not possible to really tell *where* a variable came from (see https://stackoverflow.com/questions/64257527/).
+					A module's members may have been imported from another module, so you can't say exactly what module a variable
+					belongs to. Or if a variable is the same across multiple classes, which class was it defined in initially?
+					So you have to make some assumptions.
+					
+					- modules are their own source, so doesn't make sense to set it for module types
+					- external variables don't need best source, since it is defined externally; user can choose to
+					document each reference individually, or just mark it as external
+					All that is left is DATA types, which we do an analysis of the graph of module imports
+					
+					DATA variable defined in multiple modules; have to do some more in depth analysis
+					to determine which module is the "true" source of the variable.
+					
+					Some of cases needed to resolve:
+					- variable set in multiple classes, modules, or both
+					- data variables in external modules, e.g. val = ext_dict["attr"]; no way to detect that as from
+					an external module
+					- routines/classes defined in <locals>
+					
+					ref can be module, class, or routine; for now we'll ignore routine's, since those are either
+					1) a bound self 2) external function 3) <locals> function. If user needs source_ref, they
+					can pick one manually
+				"""
+				if dont_resolve(vv):
+					continue
+				crefs = list(r for r in vv.refs if isinstance(r, ClassAPI))
+				mrefs = list(r for r in vv.refs if isinstance(r, ModuleAPI))
+				# convert crefs to modules temporarily
+				mod_refs = defaultdict(list)
+				for m in mrefs:
+					mod_refs[m].append(m)
+				for c in crefs:
+					if c.module in self.mods_tbl:
+						mod_refs[self.mods_tbl[c.module]].append(c)
+				mod_lst = list(mod_refs.keys())
+				# can't specify source... probably bound to a routine or something, but not referenced elsewhere
+				if not mod_lst:
+					continue
+				if len(mod_lst) > 1:
+					best_mod = self.module_import_analysis(vv.value, mod_lst)
 				else:
-					# class which is referenced the most times
-					refs.sort(key=lambda m: (-sum(len(l) for l in m.refs.values()), m.qualified_name))
-					vv.source_ref = refs[0]
-			# shouldn't happen, but may be some cases I haven't thought of
-			except Exception as e:
-				print("Failed to set source_ref after analyzing import graph and classes")
-				print("value:", vv)
-				print("candidate modules:", mod_lst)
-				print("best module:", best_mod.name)
-				print("refs within this module:", refs)
-				raise e
+					best_mod = mod_lst[0]
+				# we have our guess for module that it came from, now pick a class
+				# if it is referenced in the actual module, then we'll assume it was defined there, and then
+				# referenced inside the class, rather than the other way around
+				refs = mod_refs[best_mod]
+				try:
+					if refs[0] is best_mod:
+						vv.source_ref = best_mod
+					elif len(refs) == 1:
+						vv.source_ref = refs[0]
+					else:
+						# class which is referenced the most times
+						refs.sort(key=lambda m: (-sum(len(l) for l in m.refs.values()), m.qualified_name))
+						vv.source_ref = refs[0]
+				# shouldn't happen, but may be some cases I haven't thought of
+				except Exception as e:
+					print("Failed to set source_ref after analyzing import graph and classes")
+					print("value:", vv)
+					print("candidate modules:", mod_lst)
+					print("best module:", best_mod.name)
+					print("refs within this module:", refs)
+					raise e
 
 	def add_external_module(self, mod_name:str):
 		""" Mark all variables from the given module as "external" variables― outside the package.
@@ -240,7 +250,7 @@ class PackageAPI:
 		self.ext_tbl[id(mod)].append(mod_name)
 
 	def add_variable(
-		self, val, *, module:bool=True, package:bool=True, analyze:bool=True
+		self, val, *, module:bool=False, package:bool=False, analyze:bool=True
 	) -> Union[ModuleAPI, ClassAPI, RoutineAPI, VariableValueAPI]:
 		""" Construct an "API" interface for a variable, and add it to the package's variable
 			lookup tables.
@@ -287,10 +297,6 @@ class PackageAPI:
 				self.mods_tbl[vv.name] = vv
 		if analyze:
 			self._need_analysis.append(vv)
-		# add fully qualified name
-		if isinstance(vv, (ModuleAPI, ClassAPI, RoutineAPI)):
-			# print("add:", vv, vv.fully_qualified_name)
-			self.fqn_tbl[vv.fully_qualified_name] = vv
 		return vv
 
 	# Following methods are default options
@@ -323,7 +329,7 @@ class PackageAPI:
 		return False
 
 	@staticmethod
-	def default_var_exclude(pkg: "PackageAPI", parent, value: VariableValueAPI, name: str) -> bool:
+	def default_var_exclude(pkg: PackageAPI, parent: VariableValueAPI, value: VariableValueAPI, name: str) -> bool:
 		""" Default variable exclusion callback. This ignores variables that are:
 
 			- private: variable begins with single underscore (see :meth:`is_private`)
@@ -333,10 +339,10 @@ class PackageAPI:
 			  ``__all__`` and ``__version__`` within the ``__init__`` module, and also non-inherited class methods
 
 			:param pkg: PackageAPI for this variable
-			:param parent: the context in which we discovered this variable
-			:param value: the value of the variable
+			:param VariableValueAPI parent: the context in which we discovered this variable
+			:param VariableValueAPI value: the value of the variable
 			:param name: the name of the variable
-			:returns: bool indicating 
+			:returns: bool, ``True`` if the value should be excluded
 		"""
 		class_mbr = isinstance(parent, ClassAPI)
 		if is_private(name):

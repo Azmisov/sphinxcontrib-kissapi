@@ -32,6 +32,8 @@ class ModuleAPI(VariableValueAPI):
 			logger.warning("Could not analyze module %s", self.name, exc_info=e)
 			self.analyzer = None
 
+		self.package.fqn_tbl[self.fully_qualified_name] = self
+
 	@property
 	def name(self) -> str:
 		return self.module

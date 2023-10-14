@@ -52,7 +52,7 @@ class Immutable:
 		self.val = val
 
 	@staticmethod
-	def is_immutable(val, readonly=False):
+	def is_immutable(val):
 		""" Truly immutable values, e.g. ``x is y`` is always true for two vars of these types
 			But besides the "is" test, we want things that intuitively you would think copy when assigned,
 			rather than referenced on assignment. The three main ones for that are:

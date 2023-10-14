@@ -1,4 +1,4 @@
-from functools import partial, partialmethod
+from functools import partial, partialmethod, cached_property
 
 from ._value import VariableValueAPI
 
@@ -16,7 +16,6 @@ class RoutineAPI(VariableValueAPI):
 		# since we override source_ref, we need to set up our own vars so it won't error
 		super().__init__(*args, **kwargs)
 
-		self.package.fqn_tbl[self.fully_qualified_name] = self
 		self._source_ref = None
 
 	@property
@@ -87,12 +86,13 @@ class RoutineAPI(VariableValueAPI):
 			# different types have different names for the underlying function
 			if isinstance(root, property):
 				func = "fget"
-			elif isinstance(root, (partial, partialmethod)):
+			elif isinstance(root, (partial, partialmethod, cached_property)):
 				func = "func"
 			else:
 				func = "__func__"
 			if not hasattr(root, func):
 				break
+			# the object its bound to
 			if hasattr(root, "__self__"):
 				parent = root.__self__
 				par_vv = self.package.add_variable(parent)
@@ -107,6 +107,9 @@ class RoutineAPI(VariableValueAPI):
 			root_vv = self.package.add_variable(root)
 			root_vv.add_ref(self, "__func__")
 			self.base_function = root_vv
+
+		# e.g. partial won't have qualified name until we can find the base 
+		self.package.fqn_tbl[self.fully_qualified_name] = self
 
 	def is_bound(self):
 		""" Whether this is a bound method for another root function. For example, a class method

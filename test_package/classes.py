@@ -1,4 +1,5 @@
 import types
+from functools import cached_property
 
 class Parent:
     attr_static_parent = None
@@ -33,6 +34,10 @@ class Parent:
     @property
     def attr_property(self):
         """ an instance data attribute creating using ``property`` decorator """
+        pass
+    @cached_property
+    def attr_property(self):
+        """ an instance data attribute creating using ``cached_property`` decorator """
         pass
 
 class Child(Parent):

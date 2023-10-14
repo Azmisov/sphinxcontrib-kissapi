@@ -1,5 +1,6 @@
 import re, inspect
 from inspect import Parameter
+from functools import cached_property
 
 from ._utils import logger
 from ._types import ClassMember, ClassMemberBinding, ClassMemberType, InstancePlaceholder
@@ -17,6 +18,7 @@ class ClassAPI(VariableValueAPI):
 		""" Holds an index of attributes for this class. Each of them are a dict containing the following
 			items: ``type``, ``binding``, ``reason``, and ``value``. See :meth:`~classify_members` for details
 		"""
+		
 		self.package.fqn_tbl[self.fully_qualified_name] = self
 	
 	@property
@@ -144,8 +146,17 @@ class ClassAPI(VariableValueAPI):
 				bound_val = val
 
 			# figure out what type of attribute this is
+
+			# cached_property is also routine, so need to go first
+			if isinstance(val, cached_property):
+				binding = {
+					"type": ClassMemberType.DATA,
+					"binding": ClassMemberBinding.INSTANCE,
+					"reason":"property",
+					"source": source(val.func)
+				}
 			# this gets functions, methods, and C extensions
-			if inspect.isroutine(val):
+			elif inspect.isroutine(val):
 				# find the root function, and a list of bound parents
 				parents = []
 				root_fn = bound_val
