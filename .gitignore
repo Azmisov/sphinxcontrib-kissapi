@@ -3,3 +3,5 @@ __pycache__/
 *.py[cod]
 dist/
 build/
+**/kissapi_output
+public/

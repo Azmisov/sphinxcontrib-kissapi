@@ -5,33 +5,23 @@ from functools import cached_property
 from ._utils import logger
 from ._types import ClassMember, ClassMemberBinding, ClassMemberType, InstancePlaceholder
 from ._value import VariableValueAPI
+from ._routine import RoutineAPI
 
 class ClassAPI(VariableValueAPI):
 	""" Specialization of VariableValueAPI for class types. This will autodetect methods and attributes """
 	instance_finder = re.compile(r"\s+self\.(\w+)\s*=")
 	""" RegEx for identifying instance variables from source code, e.g. ``self.var = 'value'``"""
-	__slots__ = ["attrs"]
 	
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
-		self.attrs = {}
-		""" Holds an index of attributes for this class. Each of them are a dict containing the following
-			items: ``type``, ``binding``, ``reason``, and ``value``. See :meth:`~classify_members` for details
-		"""
-		
-		self.package.fqn_tbl[self.fully_qualified_name] = self
-	
+		# PackageAPI.add_variable would not create ClassAPI unless the class's __module__ was part of the package
+		self.package.src_tbl[self.source_fully_qualified_name_ext] = self
+
 	@property
-	def name(self) -> str:
-		return self.qualified_name.rsplit(".",1)[-1]
-	
-	@property
-	def qualified_name(self) -> str:
-		return self.value.__qualname__
-	
-	@property
-	def module(self) -> str:
-		return self.value.__module__
+	def source_fully_qualified_name_ext(self):
+		""" Fully qualified name given in source definition of class """
+		v = self.value
+		return v.__module__ + "::" + v.__qualname__
 	
 	def analyze_members(self):
 		""" Analyze attributes of the class. That includes static, class, and instance
@@ -41,7 +31,7 @@ class ClassAPI(VariableValueAPI):
 		with logger.indent():
 			raw_attrs = self.classify_members()
 			# need to use the module analyzer to get instance attributes
-			cont_mod = self.package.fqn_tbl[self.module]
+			cont_mod = self.package.src_tbl[self.value.__module__]
 			raw_inst_attrs = cont_mod.instance_attrs(self.qualified_name)
 			# ModuleAnalyzer can't say if it is an instance method
 			# this parses source code looking for "self.XXX", and we'll assume those are instance attributes
@@ -80,16 +70,13 @@ class ClassAPI(VariableValueAPI):
 					self.add_member(k, vv, cust_val)
 
 	def classify_members(self):
-		""" Retrieve attributes and their types from a class. This does a pretty thorough examination of the attribute
+		""" Retrieve attributes and their types from the class. This does a pretty thorough examination of the attribute
 			types, and can handle things like: ``classmethod``, ``staticmethod``, ``property``, bound methods, methods
 			defined outside the class, signature introspection, and slots.
 
 			:returns: (dict) a mapping from attribute name to attribute type; attribute type is a dict with these items:
 
 				- ``type``: "method", for routines; "data", for properties, classes, and other data values
-				- ``source``: (optional) if the attribute was a routine or property, the fully qualified name to the source code
-				- ``parents``: ("method" only) parents that were bound to the routine
-				- ``function``: ("method" only) the root function, before being bound to ``parents``
 				- ``binding``: "static", "class", "instance", or "static_instance"; the distinctions are not super clear-cut
 				  in python, so this is more of a loose categorization of what scope the attribute belongs to; here is a
 				  description of each:
@@ -123,21 +110,13 @@ class ClassAPI(VariableValueAPI):
 				if attr == "__dict__" or attr == "__weakref__":
 					continue
 				slots.add(attr)
-		def source(f):
-			""" fully qualified name for function """
-			# wrapper_descriptor is unexposed CPython class that wraps methods on builtin classes (C routines);
-			# it will get bound to instances as a separate method-wrapper class; it doesn't have __module__,
-			# but we can get it from __objclass__ (the bultin class that's wrapped) instead
-			if not hasattr(f, "__module__"):
-				module = f.__objclass__.__module__
-			else:
-				module = f.__module__
-			return "{}::{}".format(module, f.__qualname__)
 		
 		# Note that when __slots__ is defined and doesn't contain __dict__, __dict__ will not be available on class instances
 		# However, we're introspecting on the *class* itself, not an instance; and __dict__ will always be available in this case
 		for var,val in cls.__dict__.items():
-			print("ATTRIBUTE:", var, val)
+			RoutineAPI.analyze_bindings(cls, var)
+			
+			
 			# this goes through descriptor interface, which binds the underlying value to the class/instance if needed
 			try:
 				bound_val = getattr(cls, var)
@@ -147,13 +126,13 @@ class ClassAPI(VariableValueAPI):
 
 			# figure out what type of attribute this is
 
-			# cached_property is also routine, so need to go first
+			# cached_property is a routine to start, but then gets overridden in __dict__ with
+			# the value of the property when first called
 			if isinstance(val, cached_property):
 				binding = {
 					"type": ClassMemberType.DATA,
 					"binding": ClassMemberBinding.INSTANCE,
-					"reason":"property",
-					"source": source(val.func)
+					"reason":"cached_property"
 				}
 			# this gets functions, methods, and C extensions
 			elif inspect.isroutine(val):
@@ -168,10 +147,7 @@ class ClassAPI(VariableValueAPI):
 						parents.append(root_fn.__self__)
 					root_fn = root_fn.__func__
 				binding = {
-					"type":ClassMemberType.METHOD,
-					"source": source(root_fn),
-					"parents": parents,
-					"function": root_fn
+					"type":ClassMemberType.METHOD
 				}
 				# bound to the class automatically
 				if isinstance(val, classmethod):
@@ -246,7 +222,6 @@ class ClassAPI(VariableValueAPI):
 					"type": ClassMemberType.DATA,
 					"binding": ClassMemberBinding.INSTANCE,
 					"reason":"property",
-					"source": source(val.fget)
 				}
 			elif var in slots:
 				binding = {

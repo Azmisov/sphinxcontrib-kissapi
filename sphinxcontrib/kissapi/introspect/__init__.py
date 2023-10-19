@@ -29,23 +29,19 @@ from ._module import ModuleAPI
 from ._package import PackageAPI
 from ._documenter import Documenter
 
-_pkg_memoize = {}
 def analyze_package(pname:str, *args, **kwargs) -> PackageAPI:
-	""" Factory for PackageAPI. It memoizes previously analyzed packages
-		and reuses the results if possible; otherwise, it will import the module
-		and create a new PackageAPI
+	""" Factory for PackageAPI. It will import the module and create a new PackageAPI
 
-		.. Note::
-			Memoizing does not consider differing PackageAPI ``options`` arguments
-
-		:param pname: the package to be analyzed
+		:param str pname: the package to be analyzed
 		:param args: forwarded to `:class:~PackageAPI.__init__`
 		:param kwargs: forwarded to `:class:~PackageAPI.__init__`
 		:returns: `:class:~PackageAPI` for inspecting package types and documentation
 	"""
-	if pname in _pkg_memoize:
-		return _pkg_memoize[pname]
-	m = importlib.import_module(pname)
-	api = PackageAPI(m, *args, **kwargs)
-	_pkg_memoize[pname] = api
+	# TODO: have import_modules callback in PackageAPI which handles importing 1+ modules for
+	#	package, instead of this simplistic code here
+	if not isinstance(pname, str):
+		raise TypeError("Pass a package name as a string")
+	logger.info("Importing module %s", pname)
+	importlib.import_module(pname)
+	api = PackageAPI(pname, *args, **kwargs)
 	return api

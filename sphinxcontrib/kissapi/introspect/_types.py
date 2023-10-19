@@ -16,7 +16,9 @@ class VariableType(enum.IntEnum):
 	@staticmethod
 	def detect_type(val) -> VariableType:
 		""" Determine `:class:introspect.VariableType` for a variable """
-		if inspect.isroutine(val) or isinstance(val, (partial, partialmethod, property)):
+		# @cached_property, method_descriptor, @partialmethod, @cache/@lru_cache, and @wrap all
+		# get caught by inspect call
+		if inspect.isroutine(val) or isinstance(val, (partial, property)):
 			return VariableType.ROUTINE
 		if inspect.ismodule(val):
 			return VariableType.MODULE

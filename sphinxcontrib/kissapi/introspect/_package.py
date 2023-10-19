@@ -8,7 +8,7 @@ from ._module import ModuleAPI
 from ._class import ClassAPI
 from ._routine import RoutineAPI
 from ._value import VariableValueAPI
-from ._utils import logger, is_private, is_special
+from ._utils import logger, is_private, is_special, logging
 
 class _AtomicNode:
 	""" Used for module import analysis; a node in the import graph """
@@ -42,16 +42,16 @@ class _CycleDetected(Exception):
 
 class PackageAPI:
 	""" API for introspecting types and documentation inside a full python package """
-	__slots__ = ["name","package","mods_tbl","ext_tbl","int_tbl","var_tbl","fqn_tbl","var_exclude","_need_analysis"]
+	__slots__ = ["name","package","mods_tbl","ext_tbl","int_tbl","var_tbl","src_tbl","var_exclude","_need_analysis"]
 
-	def __init__(self, pkg: types.ModuleType, options:dict={}):
+	def __init__(self, name, options:dict={}):
 		""" Parse a root module and extract the API for introspecting its types and documentation """
 		# find all modules that are part of this package
-		self.name: str = pkg.__name__
-		""" Name of the package (that being the name of the main package's module) """
+		self.name: str = name
+		""" Name of the package. This means the name of the main package's module) """
 		self.ext_tbl: dict[int, list[str]] = defaultdict(list)
 		""" Importable variables from external modules. It maps variable id's (e.g. ``id(var)``) to
-			a list of modules the variable is available from
+			a list of module names the variable is available from
 		"""
 		self.int_tbl: dict[str, ModuleAPI] = {}
 		""" Internal modules of the package, a superset of `:attr:~mods_tbl`: ``{module_name: ModuleAPI}`` """
@@ -61,12 +61,13 @@ class PackageAPI:
 		""" All importable variables from the package: ``{variable_id: VariableValueAPI}`` """
 		self._need_analysis: list[int] = []
 		""" List of vars from ``var_tbl`` that still need analysis """
-		self.fqn_tbl: dict[str, VariableValueAPI] = {}
-		""" Lookup table for fully qualified names, mapping to VariableValueAPI objects. This does not contain
-			all variables, just those that encode raw qualified name data, like classes, functions, and modules. 
+		self.src_tbl: dict[str, VariableValueAPI] = {}
+		""" Lookup table for variables by their fully qualified names as defined in source. These
+			come from specials like ``__module__`` and ``__qualname__``. This does not contain all
+			variables, just those that encode raw qualified name data, like classes, functions, and
+			modules. Variables defined outside of the internal modules of the package will not
+			be included in this table.
 		"""
-		self.package = self.add_variable(pkg, module=True, package=True)
-		""" The module entry-point for the package. Also accessible as first element of `modules` """
 
 		noop_cbk = lambda *args: False
 		def get_cbk(name, default):
@@ -81,24 +82,34 @@ class PackageAPI:
 		mods_seen = set([self.name])
 		while True:
 			seen_new = False
-			for k in list(sys.modules.keys()):
-				if k in mods_seen:
+			for name in list(sys.modules.keys()):
+				if name in mods_seen:
 					continue
-				mods_seen.add(k)
+				mods_seen.add(name)
 				seen_new = True
-				should_exclude = package_exclude(self.name, k)
+				should_exclude = package_exclude(self.name, name)
 				if should_exclude is True:
-					logger.verbose("Excluding module's variables: %s", k)
-					self.add_external_module(k)
+					logger.verbose("Excluding module's variables: %s", name)
+					self.add_external_module(name)
 					continue
 				# internal; may or may not be included in package though
-				should_include = not should_exclude
-				self.add_variable(sys.modules[k], module=True, package=should_include, analyze=should_include)
+				vv = self.add_variable(sys.modules[name], module=True, analyze=not should_exclude)
+				self.int_tbl[name] = vv
+				if not should_exclude:
+					self.mods_tbl[name] = vv
+					# package modules get a reference to this PackageAPI, indicating they are a valid module to import from
+					vv.add_ref(self, name)
 			if not seen_new:
 				break
-		logger.verbose("%d internal modules", len(self.int_tbl))
-		logger.verbose("%d accessible modules belong to package", len(self.mods_tbl))
-		logger.verbose("%d exported variables defined in external modules", len(self.ext_tbl))
+		if logger.isEnabledFor(logging.LEVEL_NAMES["VERBOSE"]):
+			def log_iter(header, i):
+				l = list(sorted(i))
+				l.insert(0, header)
+				logger.verbose("\n\t".join(l))
+			log_iter(f"{len(self.mods_tbl)} public package modules:", self.mods_tbl)
+			p = set(self.int_tbl) - set(self.mods_tbl)
+			log_iter(f"{len(p)} private package modules:", p)
+			logger.verbose("%d exported variables defined in external modules", len(self.ext_tbl))
 
 		# analyse all variables; repeat until no new sub-variables have been discovered
 		# (e.g. can't analyze var's members until var has been added itself)
@@ -115,6 +126,8 @@ class PackageAPI:
 					vv.analyze_members()
 			analyze_pass += 1
 		logger.verbose("Finished analyzing variable members")
+
+		raise RuntimeError("not implemented")
 
 		logger.verbose("Determining source definition of variables")
 		def dont_resolve(vv):
@@ -255,16 +268,16 @@ class PackageAPI:
 		""" Construct an "API" interface for a variable, and add it to the package's variable
 			lookup tables.
 			
-			Make sure to add all package modules first, before other variables
+			Make sure to add all package modules first, before other variables, as the module's
+			ModuleAnalyzer may be used to analyze members.
 
 			:param val: variable value
 			:param bool module: if True, this variable can be a `:class:~introspect.ModuleAPI`; if False,
 				modules will be treated as plain `:class:~introspect.VariableValueAPI` instead
-			:param bool package: if True, and the variable is a module, it will be added to the
-			 	package's module table `:attr:~introspect.PackageAPI.mods_tbl`
 			:param bool analyze: if True, mark this variable for member analysis				 
 			:returns: the "API" class for this value, possibly newly created if it hasn't been seen before
 		"""
+		# already added?
 		if id(val) in self.var_tbl:
 			return self.var_tbl[id(val)]
 
@@ -281,20 +294,15 @@ class PackageAPI:
 						clazz = ClassAPI
 					elif vtype == VariableType.ROUTINE:
 						clazz = RoutineAPI
-			except: pass
+			except Exception as e:
+				print("class/routine specialization failed:", e)
+				pass
 		# create
 		vv = clazz(val, self, vtype)
-		vv_id = vv.id()
-		self.var_tbl[vv_id] = vv
+		self.var_tbl[vv.id] = vv
 		# check if any external modules reference this variable
-		if vv_id in self.ext_tbl:
-			vv.ext_refs = self.ext_tbl[vv_id]
-		# internal module
-		if clazz is ModuleAPI:
-			self.int_tbl[vv.name] = vv
-			# module belongs to package
-			if package:
-				self.mods_tbl[vv.name] = vv
+		if vv.id in self.ext_tbl:
+			vv.ext_refs = self.ext_tbl[vv.id]
 		if analyze:
 			self._need_analysis.append(vv)
 		return vv
@@ -315,7 +323,7 @@ class PackageAPI:
 			 - ``"executable"``: internal module excluded due to being executable
 		"""
 		# ignore if not in same namespace as package
-		if not module_name.startswith(pkg_name+"."):
+		if not (module_name.startswith(pkg_name) and (len(module_name) == len(pkg_name) or module_name[len(pkg_name)] == '.')):
 			return True
 		# ignore private modules
 		if any(x.startswith("_") for x in module_name[len(pkg_name)+1:].split(".")):
@@ -346,10 +354,10 @@ class PackageAPI:
 		"""
 		class_mbr = isinstance(parent, ClassAPI)
 		if is_private(name):
-			logger.verbose("Excluding %s (private); %s", name, value)
+			logger.verbose("Excluding %s (private), context %s", name, parent)
 			return True
 		if not class_mbr and value.is_external():
-			logger.verbose("Excluding %s (external); %s", name, value)
+			logger.verbose("Excluding %s (external), context %s", name, parent)
 			return True
 
 		# allow __all/version__ for the package module itself
@@ -358,7 +366,7 @@ class PackageAPI:
 			allowed_init = name in special_include and parent is pkg.package
 			allowed_override = isinstance(value, RoutineAPI) and (class_mbr or name == "__func__")
 			if not (allowed_init or allowed_override):
-				logger.verbose("Excluding %s (special); %s", name, value)
+				logger.verbose("Excluding %s (special), context %s", name, parent)
 				return True
 
 	@staticmethod

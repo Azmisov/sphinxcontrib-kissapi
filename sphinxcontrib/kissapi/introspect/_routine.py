@@ -1,6 +1,27 @@
+from weakref import WeakSet
 from functools import partial, partialmethod, cached_property
+from types import (
+	MethodType, FunctionType, WrapperDescriptorType, MethodDescriptorType,
+	MethodWrapperType, ClassMethodDescriptorType, BuiltinMethodType
+)
 
+from ._types import InstancePlaceholder
 from ._value import VariableValueAPI
+from ._utils import logger
+
+class RoutineBinding:
+	""" An entry in a chain of nested, bound routines. See `:meth:~RoutineAPI.analyze_bindings` """
+	__slots__ = ["base","bound","replacement"]
+	def __init__(self, base, bound:tuple, routine):
+		self.base = base
+		""" Object handling binding or calls, such as a descriptor or callable """
+		self.bound: tuple = bound
+		""" Tuple of bound prefixed arguments """
+		self.routine = routine
+		""" Indicates the actual object that will be called. If a class, it indicates placeholder
+			type that will be created for an instance. ``None`` indicates passthrough to the next
+			nesting level when accessed, for example ``staticmethod``.
+		"""
 
 class RoutineAPI(VariableValueAPI):
 	""" Specialization of VariableValueAPI for routines. That includes things like function, lambda, method, c extension
@@ -16,29 +37,21 @@ class RoutineAPI(VariableValueAPI):
 		# since we override source_ref, we need to set up our own vars so it won't error
 		super().__init__(*args, **kwargs)
 
-		self._source_ref = None
+	@property
+	def source_fully_qualified_name_ext(self):
+		""" Fully qualified name given in source definition of the base routine """
+		v = self.base_function.value
+		return v.__module__ + "::" + v.__qualname__
 
 	@property
-	def name(self) -> str:
-		return self.qualified_name.rsplit(".", 1)[-1]
-
-	@property
-	def qualified_name(self) -> str:
-		return self.base_function.value.__qualname__
-
-	@property
-	def module(self) -> str:
-		return self.base_function.value.__module__
-
-	@property
-	def source_ref(self):
+	def _old_source_ref(self):
 		""" overrides VariableValueAPI.source_ref to retrieve the source of the base source function,
 			rather than the bound method
 		"""
 		return self.base_function._source_ref
 
-	@source_ref.setter
-	def source_ref(self, val):
+	@_old_source_ref.setter
+	def _old_source_ref(self, val):
 		""" the source_ref may not actually be in refs yet for root functions of RoutineAPI; this happens
 			if the actual ref (qualified name) is a bound method, and we're just pretending the true source
 			is the underlying function
@@ -86,7 +99,7 @@ class RoutineAPI(VariableValueAPI):
 			# different types have different names for the underlying function
 			if isinstance(root, property):
 				func = "fget"
-			elif isinstance(root, (partial, partialmethod, cached_property)):
+			elif isinstance(root, (partial, cached_property)):
 				func = "func"
 			else:
 				func = "__func__"
@@ -107,14 +120,110 @@ class RoutineAPI(VariableValueAPI):
 			root_vv = self.package.add_variable(root)
 			root_vv.add_ref(self, "__func__")
 			self.base_function = root_vv
-
-		# e.g. partial won't have qualified name until we can find the base 
-		self.package.fqn_tbl[self.fully_qualified_name] = self
-
-	def is_bound(self):
-		""" Whether this is a bound method for another root function. For example, a class method
-			is a function that is bound to the class; so there are two objets, the function and the bound method.
-			When analyze_members is called on a bound routine, it will drill down to the root function and add
-			it as a separate RoutineAPI variable, or plain VariableValueAPI if it was an external function.
+	
+	@staticmethod
+	def analyze_bindings(root, clazz=None, instance_placeholder:InstancePlaceholder=None) -> list[RoutineBinding]:
+		""" Analyze the wrapped nesting of callables and bindings for a member
+		
+			:param root: the member value, representing the root of the analysis
+			:param clazz: if not ``None``, it specifies that we should interpret ``root`` as being 
+				accessed from an instance of ``clazz`` through ``__getattribute__``, resolving
+				top-level descriptors that are encountered
+			:param instance_placeholder: a value to use as a substitute for bindings to an
+				instance of ``clazz``; if ``None`` a value will be autocreated if needed
 		"""
-		return self.base_function is not self
+		NULL = object()
+		# wrappers will prefix arguments/bindings, so innermost gives first args
+		stack: list[RoutineBinding] = []
+		# set of roots we've analyzed, to avoid loops
+		seen = WeakSet()
+		
+		while True:
+			wrapped = NULL
+			bound = ()
+			routine = NULL
+
+			# candidate to go through descriptor interface and receive a binding
+			if clazz is not None:
+				delegate = False
+				if instance_placeholder is None:
+					instance_placeholder = InstancePlaceholder()
+
+				if isinstance(root, classmethod):
+					wrapped = root.__func__
+					bound = (clazz,)
+					routine = MethodType
+				elif isinstance(root, staticmethod):
+					wrapped = root.__func__
+					routine = None
+				elif isinstance(root, property):
+					wrapped = root.fget
+					bound = (instance_placeholder,)
+				elif isinstance(root, cached_property):
+					wrapped = root.func
+					bound = (instance_placeholder,)
+				elif isinstance(root, partialmethod):
+					wrapped = root.func
+					bound = root.args
+					routine = partial
+					delegate = True
+				# example: object.__str__
+				elif isinstance(root, WrapperDescriptorType):
+					# wrapped is a C/builtin function, so not available
+					bound = (instance_placeholder,)
+					routine = MethodWrapperType
+				# examples: str.join, dict.__dict__["__contains__"]
+				elif isinstance(root, MethodDescriptorType):
+					# wrapped is a C/builtin function, so not available
+					bound = (instance_placeholder,)
+					routine = BuiltinMethodType
+				# example: dict.__dict__["fromkeys"]
+				elif isinstance(root, ClassMethodDescriptorType):
+					# wrapped is a C/builtin function, so not available
+					bound = (clazz,)
+					routine = BuiltinMethodType
+				# assumes BuiltinFunctionType are not descriptors
+				elif isinstance(root, FunctionType):
+					wrapped = root
+					bound = (instance_placeholder,)
+					routine = MethodType
+
+				# wrapper can forward the descriptor call to a wrapped descriptor
+				if not delegate:
+					clazz = None
+
+			# otherwise, a non-descriptor
+			if bound is None:
+				if isinstance(root, MethodType):
+					wrapped = root.__func__
+					bound = (root.__self__,)
+				# example: dict().__contains__
+				elif isinstance(root, BuiltinMethodType):
+					bound = (root.__self__,)
+				# example: object().__str__
+				elif isinstance(root, MethodWrapperType):
+					bound = (root.__self__,)
+				elif isinstance(root, partial):
+					wrapped = root.func
+					bound = root.args
+				# examples: cache, lru_cache, wraps
+				else:
+					wrapped = getattr(root, "__wrapped__", NULL)
+
+			if routine is NULL:
+				routine = root
+			stack.append(RoutineBinding(root, bound, routine))
+			# enforce that wrappers are callables;
+			# warnings where there could be a problem with our analysis, or a bug in the user's program
+			if callable(wrapped):
+				root = wrapped
+				if root in seen:
+					logger.warn("wrapped functions in binding chain form a loop: %s", root)
+					break
+				seen.add(root)
+			else:
+				if wrapped is not NULL:
+					logger.warn("wrapped function in binding chain is not callable: %s", wrapped)
+				break
+
+		return stack

@@ -1,5 +1,7 @@
+import typing
+from functools import cached_property
 from sphinx.ext.autodoc import (
-	PropertyDocumenter, ModuleDocumenter, AttributeDocumenter,
+	PropertyDocumenter, ModuleDocumenter, AttributeDocumenter, ExceptionDocumenter,
 	MethodDocumenter, DataDocumenter, ClassDocumenter, FunctionDocumenter
 )
 from sphinx.ext.autosummary import mangle_signature, extract_summary
@@ -11,7 +13,13 @@ from ._module import ModuleAPI
 from ._class import ClassAPI
 from ._routine import RoutineAPI
 
+if typing.TYPE_CHECKING:
+	from ._value import VariableReference
+
 class Documenter:
+	""" Handles fetching documentation for a value. Currently, a wrapper around autodoc classes.
+		The documenter object should be accessed via `:meth:VariableValueAPI.get_documenter`
+	"""
 	directive = None
 	""" a reference to a sphinx directive """
 	options = None
@@ -25,24 +33,18 @@ class Documenter:
 		cls.directive = directive
 		cls.options = DocumenterBridge(directive.env, directive.state.document.reporter, Options(), directive.lineno, directive.state)
 
-	__slots__ = ["ref","name","fqn","value","doc"]
+	__slots__ = ["ref","doc"]
 
-	def __init__(self, fqn:str, value, ref, name:str):
+	def __init__(self, ref:VariableReference):
 		""" Retrieves the same kind of "Documenter" object that autodoc would use to document this variable
 
-			:param fqn: fully qualified variable name
-			:param value: VariableValueAPI of variable
-			:param ref: parent reference for variable
-			:param name: variable name used for reference; can be None, in which case it will just document value
-				directly, as though it were not attached to any
+			:param ref: variable reference that you wish to document; for data/instance values,
+				documentation could be tied to a specific reference to a name, so this let's you
+				control which is looked up
 		"""
 		if Documenter.directive is None or Documenter.options is None:
 			raise RuntimeError("must call bind_directive before Documenter will work")
-
 		self.ref = ref
-		self.name = name
-		self.fqn = fqn
-		self.value = value
 
 		""" How autodoc gets documentation for objects:
 			Entry point is Documenter.add_content(additional_content, don't_include_docstring)
@@ -66,41 +68,47 @@ class Documenter:
 			gets pretty complicated. So for now, I'll just use the autodoc classes
 		"""
 		# determine autodoc documenter class type
-		if isinstance(value.value, property):
+		t = None
+		value = ref.value
+		parent = ref.parent
+		if isinstance(value.value, (property, cached_property)):
 			t = PropertyDocumenter
-		elif isinstance(ref, ClassAPI) and name is not None:
-			extra = ref.members[name]
+		elif isinstance(parent, ClassAPI):
+			extra = parent.members[ref.name]
 			r = extra.reason
+			# TODO: get rid of this condition now that SlotsDocumenter is nonexistent
 			if (r == "moduleanalyzer" and extra.binding == ClassMemberBinding.INSTANCE) or r == "slots":
 				t = AttributeDocumenter
 			elif extra.type == ClassMemberType.METHOD and isinstance(value, RoutineAPI):
 				t = MethodDocumenter
-			elif extra.type == ClassMemberType.INNERCLASS and isinstance(value, ClassAPI):
-				t = ClassDocumenter
-			else:
+			elif extra.type != ClassMemberType.INNERCLASS:
 				t = AttributeDocumenter
-		elif isinstance(value, RoutineAPI):
-			t = FunctionDocumenter
-		elif isinstance(value, ClassAPI):
-			t = ClassDocumenter
-		elif isinstance(value, ModuleAPI):
-			t = ModuleDocumenter
-		else:
-			t = DataDocumenter
-		# TODO: specialization for enum and exception
-		# PropertyDocumenter, ExceptionDocumenter, DecoratorDocumenter, TypeVarDocumenter, NewTypeDocumenter, NewTypeAttributeDocumenter, 
+		if t is None:
+			if isinstance(value, RoutineAPI):
+				t = FunctionDocumenter
+			elif isinstance(value, ClassAPI):
+				if isinstance(value, Exception):
+					t = ExceptionDocumenter
+				else:
+					t = ClassDocumenter
+			elif isinstance(value, ModuleAPI):
+				t = ModuleDocumenter
+			else:
+				t = DataDocumenter
+		# TODO: specialization for enum; also DecoratorDocumenter, TypeVarDocumenter,
+		# 	NewTypeDocumenter, NewTypeAttributeDocumenter?
 
-		# The rest here was copied/adapted from autosummary source code
+		# adapted from autosummary source code
+		fqn = self.ref.fully_qualified_name_ext
 		self.doc = t(Documenter.options, fqn)
+		""" autodoc Documenter class for the variable """
 		if not self.doc.parse_name():
 			raise RuntimeError("documenter parse_name failed: {}".format(fqn))
 		if not self.doc.import_object():
 			raise RuntimeError("documenter import_object failed: {}".format(fqn))
 
-		mod_name = fqn.split("::", 1)[0]
-		mod = value.package.fqn_tbl.get(mod_name, None)
-		if isinstance(mod, ModuleAPI):
-			self.doc.analyzer = mod.analyzer
+		# currently, ref always points back to ModuleAPI
+		self.doc.analyzer = ref.module.analyzer
 
 	def summary(self, max_name_chars:int=50):
 		""" Gets doc summary, as would be returned by autosummary extension
@@ -108,8 +116,9 @@ class Documenter:
 			:param max_name_chars: do not give full signature if it would cause the full name+signature to exceed this
 				number of characters, instead using "..." to fill in missing params; at minimum we will return "(...)"
 				if there is a signature
+			:returns: ``{signature, summary}``, both strings
 		"""
-		# this is copied from autosummary source
+		# adapted from autosummary source code
 		try:
 			sig = self.doc.format_signature(show_annotation=False)
 		except TypeError:
@@ -117,7 +126,7 @@ class Documenter:
 		if not sig:
 			sig = ''
 		else:
-			max_chars = max(5, max_name_chars-len(self.name))
+			max_chars = max(5, max_name_chars-len(self.ref.name))
 			sig = mangle_signature(sig, max_chars=max_chars)
 		# don't know what this line does, but if not there extract_summary doesn't work
 		# guess extract_summary is writing docutils nodes to the autodoc documenter object
@@ -138,18 +147,3 @@ class Documenter:
 		out = Documenter.options.result = StringList()
 		self.doc.generate()
 		return out
-
-	def order(self, name=None):
-		""" Get relative order index that this variable was declared
-
-			:param name: optionally use the variable's module to lookup order of an arbitrary variable name,
-				rather than the one passed into the Documenter constructor
-			:returns: tuple, (src_order, name); if src_order can't be determined for whatever reason (probably the
-				requested variable isn't part of the module), then it sets to +inf; with the tuple, it will fallback
-				to ordering alphabetically in that case
-		"""
-		if name is None:
-			name = self.fqn
-			ns = name.split("::",1)
-			name = "" if len(ns) < 2 else ns[1]
-		return (self.doc.analyzer.tagorder.get(name, float("inf")), self.name)

@@ -52,7 +52,7 @@
 from .introspect import logger
 from .manager import RenderManager, KissAPIDirective
 
-__version__ = "1.0.4"
+__version__ = "2.0.0"
 """ Current KissAPI version """
 
 def bootstrap(app):

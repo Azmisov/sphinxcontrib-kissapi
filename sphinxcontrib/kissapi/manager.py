@@ -128,7 +128,7 @@ class RenderManager:
 
 		# load up jinja environment
 		if "jinja_env" not in self.conf:
-			default_jinja_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "def_templates"))
+			default_jinja_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "default_templates"))
 			jinja_dir = self.conf.get("jinja_dir", default_jinja_dir)
 			if isinstance(jinja_dir, str):
 				if not os.path.isabs(jinja_dir):
@@ -180,10 +180,11 @@ class RenderManager:
 			self.output[oname] = out
 
 	def render_template(self, name:str, vars:dict={}) -> str:
-		""" Render a template
+		""" Render a template as a string
 
 			:param str name: name of the template
 			:param dict vars: template variables
+			:returns: str with rendered template
 		"""
 		env = self.conf.get("jinja_env",None)
 		if not isinstance(env, jinja2.Environment):
@@ -191,7 +192,7 @@ class RenderManager:
 		tpl = env.get_template(name)
 		return tpl.render(**vars)
 
-	def write_template(self, path: Union[list,tuple,str], name:str, vars:dict):
+	def write_template(self, path: Union[list,tuple,str], name:str, vars:dict) -> str:
 		""" Render a template and then write the output to a file in out_dir
 
 			:param path: the path to write to; see write_file for details
