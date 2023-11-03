@@ -55,17 +55,17 @@ class ModuleAPI(VariableValueAPI):
 		""" Get a list of documented instance-level attributes for object `name` (e.g. Class/enum/etc).
 			This is called by ``:meth:~introspect.ClassAPI.analyze_members`` to get instance members
 
-			:param str name: name of a parent object whose instance attributes we want to retrieve
+			:param str name: qualified name of a parent object whose instance attributes we want to
+			    retrieve
 			:returns: list of attribute names; empty if the parent object could not be found, or
 				it happens to have no instance attributes
 		"""
-		if self.analyzer is None:
-			return []
 		lst = []
-		attr_list = self.analyzer.find_attr_docs()
-		for parent_name, attr_name in attr_list.keys():
-			if parent_name == name:
-				lst.append(attr_name)
+		if self.analyzer is not None:
+			attr_list = self.analyzer.find_attr_docs()
+			for parent_name, attr_name in attr_list.keys():
+				if parent_name == name:
+					lst.append(attr_name)
 		return lst
 
 	def instance_attr_docs(self, name:str, attr:str) -> list[str]:

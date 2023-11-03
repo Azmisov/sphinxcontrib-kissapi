@@ -1,8 +1,8 @@
 from weakref import WeakSet
 from functools import partial, partialmethod, cached_property
 from types import (
-	MethodType, FunctionType, WrapperDescriptorType, MethodDescriptorType,
-	MethodWrapperType, ClassMethodDescriptorType, BuiltinMethodType
+	MethodType, FunctionType, WrapperDescriptorType, MethodDescriptorType, GetSetDescriptorType,
+	MethodWrapperType, ClassMethodDescriptorType, BuiltinMethodType, MemberDescriptorType
 )
 
 from ._types import InstancePlaceholder
@@ -131,6 +131,7 @@ class RoutineAPI(VariableValueAPI):
 				top-level descriptors that are encountered
 			:param instance_placeholder: a value to use as a substitute for bindings to an
 				instance of ``clazz``; if ``None`` a value will be autocreated if needed
+			:returns: bindings ordered from least to most nested
 		"""
 		NULL = object()
 		# wrappers will prefix arguments/bindings, so innermost gives first args
@@ -140,7 +141,7 @@ class RoutineAPI(VariableValueAPI):
 		
 		while True:
 			wrapped = NULL
-			bound = ()
+			bound = None
 			routine = NULL
 
 			# candidate to go through descriptor interface and receive a binding
@@ -155,6 +156,7 @@ class RoutineAPI(VariableValueAPI):
 					routine = MethodType
 				elif isinstance(root, staticmethod):
 					wrapped = root.__func__
+					bound = ()
 					routine = None
 				elif isinstance(root, property):
 					wrapped = root.fget
@@ -167,6 +169,9 @@ class RoutineAPI(VariableValueAPI):
 					bound = root.args
 					routine = partial
 					delegate = True
+				# example: __slots__ descriptors, array.array.typecode, datetime.timedelta.days
+				elif isinstance(root, (MemberDescriptorType, GetSetDescriptorType)):
+					bound = (instance_placeholder,)
 				# example: object.__str__
 				elif isinstance(root, WrapperDescriptorType):
 					# wrapped is a C/builtin function, so not available
@@ -209,6 +214,7 @@ class RoutineAPI(VariableValueAPI):
 				# examples: cache, lru_cache, wraps
 				else:
 					wrapped = getattr(root, "__wrapped__", NULL)
+					bound = ()
 
 			if routine is NULL:
 				routine = root

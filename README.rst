@@ -44,8 +44,8 @@ overwrite
 jinja_dir : str
     A directory with jinja templates, which allows you to use some helpers on the ``RenderManager`` class for easier reST
     file generation. If a relative path is given, it will be relative to the sphinx root docs folder. By default, this is
-    set to ``sphinxcontrib/kissapi/def_templates`` directory, which are some default jinja templates I have made to go
-    along with the default renderer (``sphinxcontrib.kissapi.def_render``).
+    set to ``sphinxcontrib/kissapi/default_templates`` directory, which are some default jinja templates I have made to go
+    along with the default renderer (``sphinxcontrib.kissapi.default_render``).
 jinja_env
     A custom Jinja environment to use instead of using ``jinja_dir``.
 output : dict

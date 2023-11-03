@@ -122,7 +122,8 @@ _class_category_titles = [
 	"Instance Attributes",
 	"Static Methods",
 	"Class Methods",
-	"Instance Methods"
+	"Instance Methods",
+	"Singleton Methods"
 ]
 _class_member_types = {
 	ClassMemberType.INNERCLASS: 0,
@@ -132,7 +133,8 @@ _class_member_types = {
 _class_binding_types = {
 	ClassMemberBinding.STATIC: 1,
 	ClassMemberBinding.CLASS: 2,
-	ClassMemberBinding.INSTANCE: 3
+	ClassMemberBinding.INSTANCE: 3,
+	ClassMemberBinding.SINGLETON: 4
 }
 def _class_categorize(var, extra):
 	""" Maps class member to category; output index corresponds to index inside _class_category_titles """

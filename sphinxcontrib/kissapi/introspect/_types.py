@@ -29,15 +29,16 @@ class VariableType(enum.IntEnum):
 class ClassMemberType(enum.IntEnum):
 	""" Class attribute types """
 	METHOD = 0
-	DATA = 1
+	PROPERTY = 1
 	INNERCLASS = 2
+	DATA = 3
 
 class ClassMemberBinding(enum.IntEnum):
 	""" Which "form" of a class an attribute is bound to """
 	STATIC = 0
 	CLASS = 1
-	INSTANCE = 2
-	STATIC_INSTANCE = 3
+	SINGLETON = 2
+	INSTANCE = 3
 
 class ClassMember:
 	""" Holds various information on a class attribute's form """

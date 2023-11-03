@@ -33,7 +33,7 @@ setup(
     platforms='any',
     packages=["sphinxcontrib.kissapi"],
     package_data={
-        "sphinxcontrib.kissapi":["def_templates/*.rst"]
+        "sphinxcontrib.kissapi":["default_templates/*.rst"]
     },
     install_requires=reqs,
     namespace_packages=['sphinxcontrib']
